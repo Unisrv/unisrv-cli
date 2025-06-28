@@ -1,4 +1,4 @@
-# Cloud CLI
+# Unisrv CLI
 
 A Rust-based CLI for provisioning and managing Unisrv resources.
 
