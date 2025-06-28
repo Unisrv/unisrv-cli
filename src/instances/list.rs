@@ -1,4 +1,4 @@
-use crate::{config::CliConfig, default_spinner};
+use crate::{config::CliConfig, default_spinner, error};
 use anyhow::{Ok, Result};
 use console::Emoji;
 use reqwest::Client;
@@ -46,11 +46,8 @@ pub async fn list(client: &Client, config: &mut CliConfig) -> Result<InstanceLis
         let resp: InstanceListResponse = response.json().await?;
         Ok(resp)
     } else {
-        Err(anyhow::anyhow!(
-            "Failed to list instances: {} - {}",
-            response.status(),
-            response.text().await?
-        ))
+        error::handle_http_error(response, "list instances").await?;
+        unreachable!()
     }
 }
 

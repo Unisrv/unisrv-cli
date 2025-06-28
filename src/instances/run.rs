@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{config::CliConfig, default_spinner, instances::logs};
+use crate::{config::CliConfig, default_spinner, error, instances::logs};
 use anyhow::Result;
 use console::Emoji;
 use reqwest::Client;
@@ -53,11 +53,7 @@ pub async fn run_instance(
         let id = response.json::<InstanceResponse>().await?.id;
         logs::stream_logs(client, config, id, Some(progress)).await?;
     } else {
-        return Err(anyhow::anyhow!(
-            "Failed to start instance: {} - {}",
-            response.status(),
-            response.text().await?
-        ));
+        return error::handle_http_error(response, "start instance").await;
     }
 
     Ok(())

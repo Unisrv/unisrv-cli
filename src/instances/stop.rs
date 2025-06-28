@@ -1,4 +1,4 @@
-use crate::{config::CliConfig, default_spinner};
+use crate::{config::CliConfig, default_spinner, error};
 use anyhow::Result;
 use reqwest::Client;
 use uuid::Uuid;
@@ -49,10 +49,6 @@ pub async fn stop_instance(
         println!("Successfully stopped instance with UUID: {}", uuid);
         Ok(())
     } else {
-        Err(anyhow::anyhow!(
-            "Failed to remove instance: {} - {}",
-            response.status(),
-            response.text().await?
-        ))
+        error::handle_http_error(response, "stop instance").await
     }
 }

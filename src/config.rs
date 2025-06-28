@@ -72,6 +72,23 @@ impl AuthSession {
 
         if !response.status().is_success() {
             self.delete()?;
+            let error_text = response.text().await?;
+
+            // Try to parse as JSON error response with reason field
+            if let Ok(error_response) = serde_json::from_str::<serde_json::Value>(&error_text) {
+                if let Some(reason) = error_response.get("reason").and_then(|r| r.as_str()) {
+                    return Err(anyhow::anyhow!(
+                        "{}{}",
+                        NO_ENTRY,
+                        console::style(format!(
+                            "Failed to refresh tokens: {}. Please login again.",
+                            reason
+                        ))
+                        .red()
+                    ));
+                }
+            }
+
             return Err(anyhow::anyhow!(
                 "{}Failed to refresh tokens. You need to log in again.",
                 NO_ENTRY

@@ -17,6 +17,7 @@ pub struct LoginResponse {
 }
 
 use crate::config::CliConfig;
+use crate::error;
 use anyhow::Result;
 
 pub fn command() -> Command {
@@ -60,11 +61,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
         .send()
         .await?;
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Failed to login: {} {}",
-            response.status(),
-            response.text().await?
-        ));
+        return error::handle_http_error(response, "login").await;
     }
     let login_response: LoginResponse = response.json().await?;
     config.save_auth_from_login(login_response)?;

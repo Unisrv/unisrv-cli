@@ -7,6 +7,7 @@ use reqwest::Error;
 
 mod auth;
 mod config;
+mod error;
 mod instances;
 mod login;
 
