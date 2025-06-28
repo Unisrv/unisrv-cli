@@ -1,0 +1,211 @@
+mod list;
+mod logs;
+mod run;
+mod stop;
+
+use std::collections::HashMap;
+
+use crate::config::CliConfig;
+use anyhow::Result;
+use clap::{Arg, Command};
+use reqwest::Client;
+use uuid::Uuid;
+
+pub fn command() -> Command {
+    Command::new("instance")
+        .about("Manage instances")
+        .subcommand_required(true)
+        .subcommand(
+            Command::new("run")
+                .about("Run a new instance with a specified container image")
+                .arg(
+                    Arg::new("container_image")
+                        .help("The container image to run (e.g., 'nginx:latest')")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("vcpu_count")
+                        .help("Number of vCPUs to allocate for the instance [1-32]")
+                        .long("vcpus")
+                        .short('c')
+                        .value_parser(clap::value_parser!(u8).range(1..=32))
+                        .allow_negative_numbers(false)
+                        .default_value("1"),
+                )
+                .arg(
+                    Arg::new("memory_mb")
+                        .help("Amount of memory in MB to allocate for the instance [128-65535]")
+                        .long("memory")
+                        .short('m')
+                        .value_parser(clap::value_parser!(u16).range(128..=65535))
+                        .allow_negative_numbers(false)
+                        .default_value("1024"),
+                )
+                .arg(
+                    Arg::new("env")
+                        .help("Environment variables to set in the instance, specified as KEY=VALUE pairs")
+                        .long("env")
+                        .short('e')
+                )
+                .arg(
+                    Arg::new("args")
+                        .help("Arguments to pass to the container")
+                        .num_args(0..)
+                        .trailing_var_arg(true),
+                ),
+        )
+        .subcommand(
+            Command::new("stop")
+                .alias("rm")
+                .about("Stop an instance by UUID")
+                .arg(
+                    Arg::new("uuid")
+                        .help("The UUID of the instance to terminate")
+                        .required(true),
+                ).arg(
+                    Arg::new("timeout")
+                        .help("Graceful shutdown timeout in milliseconds")
+                        .long("timeout")
+                        .short('t')
+                        .value_parser(clap::value_parser!(u32).range(0..=600_000))
+                        .default_value("5000")
+                        .allow_negative_numbers(false),
+                ),
+        )
+        .subcommand(Command::new("list").about("List all instances").alias("ls").arg(
+            Arg::new("include_stopped")
+                .help("Include stopped instances in the list")
+                .long("include-stopped")
+                .short('a')
+                .action(clap::ArgAction::SetTrue),
+        ))
+        .subcommand(
+            Command::new("logs")
+                .about("Stream logs for a specific instance")
+                .alias("log")
+                .arg_required_else_help(true)
+                .arg(
+                    Arg::new("uuid")
+                        .help("The UUID of the instance to stream logs for")
+                        .required(true),
+                )
+            )
+}
+
+pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches) -> Result<()> {
+    let http_client = Client::new();
+    match instance_matches.subcommand() {
+        Some(("run", run_matches)) => {
+            config.ensure_auth()?;
+            let vcpu_count = *run_matches.get_one::<u8>("vcpu_count").unwrap();
+            let memory_mb = *run_matches.get_one::<u16>("memory_mb").unwrap();
+            let env = parse_env_vars(run_matches.get_many::<String>("env"))?;
+            let args = run_matches
+                .get_many::<String>("args")
+                .map(|v| v.cloned().collect());
+            run::run_instance(
+                &http_client,
+                config,
+                run_matches
+                    .get_one::<String>("container_image")
+                    .expect("Container image should be required"),
+                vcpu_count,
+                memory_mb as u32,
+                args,
+                env,
+            )
+            .await
+        }
+        Some(("stop", rm_matches)) => {
+            config.ensure_auth()?;
+            let uuid = rm_matches
+                .get_one::<String>("uuid")
+                .expect("UUID should be required?");
+            let uuid = resolve_uuid(uuid, config).await?;
+            let timeout_ms = rm_matches
+                .get_one::<u32>("timeout")
+                .cloned()
+                .unwrap_or(5_000);
+            stop::stop_instance(&http_client, config, uuid, timeout_ms).await
+        }
+        Some(("list", list_matches)) => {
+            config.ensure_auth()?;
+            list::list_instances(
+                &http_client,
+                config,
+                !list_matches
+                    .get_one::<bool>("include_stopped")
+                    .unwrap_or(&false),
+            )
+            .await
+        }
+        Some(("logs", logs_matches)) => {
+            config.ensure_auth()?;
+            let uuid = logs_matches
+                .get_one::<String>("uuid")
+                .expect("UUID should be required");
+            let uuid = resolve_uuid(uuid, config).await?;
+            logs::stream_logs(&http_client, config, uuid, None).await
+        }
+        _ => Err(anyhow::anyhow!("Unknown instance command")),
+    }
+}
+
+fn parse_env_vars(
+    env_vars: Option<clap::parser::ValuesRef<'_, String>>,
+) -> Result<Option<HashMap<String, String>>> {
+    if let Some(vars) = env_vars {
+        let mut env_map = HashMap::new();
+        for var in vars {
+            let parts: Vec<&str> = var.splitn(2, '=').collect();
+            if parts.len() != 2 {
+                return Err(anyhow::anyhow!(
+                    "Invalid environment variable format: {}. Expected KEY=VALUE format.",
+                    var
+                ));
+            }
+            env_map.insert(parts[0].to_string(), parts[1].to_string());
+        }
+        Ok(Some(env_map))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn resolve_uuid(input: &str, config: &mut CliConfig) -> Result<Uuid> {
+    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
+        return Ok(parsed_uuid);
+    }
+
+    // check that the input string only is hexadecimal characters and -
+    if !input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err(anyhow::anyhow!(
+            "Invalid id format: '{}'. Only hexadecimal characters and '-' are allowed.",
+            input
+        ));
+    }
+
+    let list = list::list(&Client::new(), config).await?;
+    let starts_with_input = list
+        .instances
+        .iter()
+        .filter(|instance| {
+            instance.state == "running" && instance.id.to_string().starts_with(input)
+        })
+        .collect::<Vec<_>>();
+
+    if starts_with_input.len() == 1 {
+        Ok(starts_with_input[0].id)
+    } else if starts_with_input.is_empty() {
+        Err(anyhow::anyhow!(
+            "No instance found with UUID starting with '{}'",
+            input
+        ))
+    } else {
+        Err(anyhow::anyhow!(
+            "Multiple instances ({}) found with UUID starting with '{}'.",
+            starts_with_input.len(),
+            input
+        ))
+    }
+}
