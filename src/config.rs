@@ -17,7 +17,7 @@ pub struct AuthSession {
 
 impl AuthSession {
     fn keyring_credential() -> Result<keyring::Entry> {
-        Ok(keyring::Entry::new("cloud-cli", "auth_session")?)
+        Ok(keyring::Entry::new("unisrv-cli", "auth_session")?)
     }
 
     fn init() -> Option<Self> {
@@ -120,7 +120,7 @@ pub struct CliConfig {
 const DEFAULT_API_HOST: &str = if cfg!(debug_assertions) {
     "http://localhost:8080"
 } else {
-    "http://universe.srvapi.net"
+    "http://api.unisrv.io"
 };
 
 impl CliConfig {

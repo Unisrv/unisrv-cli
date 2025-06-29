@@ -83,7 +83,7 @@ pub async fn list_instances(
             eprintln!("{}No running instances found.", CROSS);
             return Ok(());
         } else {
-            eprintln!("{}No instances found.", CROSS);
+            eprintln!("{}No instances found. How about running one?", CROSS);
             return Ok(());
         }
     }
