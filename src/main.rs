@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod instances;
 mod login;
+mod services;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -22,6 +23,7 @@ async fn main() -> Result<(), Error> {
         .about("Provisioning CLI for managing instances")
         .subcommand_required(true)
         .subcommand(instances::command())
+        .subcommand(services::command())
         .subcommand(login::command())
         .subcommand(auth::command())
         .get_matches();
@@ -31,6 +33,9 @@ async fn main() -> Result<(), Error> {
     let r = match matches.subcommand() {
         Some(("instance", instance_matches)) => {
             instances::handle(&mut config, instance_matches).await
+        }
+        Some(("service", instance_matches)) => {
+            services::handle(&mut config, instance_matches).await
         }
         Some(("login", instance_matches)) => login::handle(&mut config, instance_matches).await,
         Some(("auth", instance_matches)) => auth::handle(&mut config, instance_matches).await,
