@@ -6,7 +6,6 @@ use serde::Deserialize;
 use tabled::{Table, Tabled, settings::Style};
 use uuid::Uuid;
 
-static CROSS: Emoji = Emoji("❌ ", "");
 pub const RUNNING_STATE: &str = "running";
 
 #[derive(Deserialize)]
@@ -81,10 +80,10 @@ pub async fn list_instances(
         .collect::<Vec<_>>();
     if table.is_empty() {
         if filter_only_running {
-            eprintln!("{}No running instances found.", CROSS);
+            eprintln!("No running instances found.");
             return Ok(());
         } else {
-            eprintln!("{}No instances found. How about running one?", CROSS);
+            eprintln!("No instances found. How about running one?");
             return Ok(());
         }
     }
