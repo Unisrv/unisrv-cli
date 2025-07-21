@@ -4,6 +4,7 @@ use chrono::DateTime;
 use console::Emoji;
 
 const NO_ENTRY: Emoji = Emoji("⛔ ", "");
+const LOCK: Emoji = Emoji("🔒 ", "");
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuthSession {
@@ -169,7 +170,7 @@ impl CliConfig {
         } else {
             return Err(anyhow::anyhow!(
                 "{}No authentication session found. Please log in with {}.",
-                NO_ENTRY,
+                LOCK,
                 login_command
             ));
         }

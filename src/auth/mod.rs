@@ -7,7 +7,10 @@ use serde::Serialize;
 
 pub fn command() -> Command {
     Command::new("auth")
-        .about("Auth related commands")
+        .about(format!(
+            "Auth related commands. For login use {} instead",
+            console::style(format!("{} login", env!("CARGO_PKG_NAME"))).bold()
+        ))
         .subcommand_required(true)
         .subcommand(
             Command::new("token")
