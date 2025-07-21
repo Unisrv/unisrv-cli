@@ -38,7 +38,7 @@ struct InstanceTableEntry {
 
 pub async fn list(client: &Client, config: &mut CliConfig) -> Result<InstanceListResponse> {
     let response = client
-        .get(&config.url("/instance/list"))
+        .get(&config.url("/instances"))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;

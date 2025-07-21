@@ -8,12 +8,30 @@ use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
 
+mod info;
+mod list;
 mod new;
 
 pub fn command() -> Command {
     Command::new("service")
         .about("Manage services")
         .subcommand_required(true)
+        .subcommand(
+            Command::new("list")
+                .about("List all services")
+                .alias("ls"),
+        )
+        .subcommand(
+            Command::new("show")
+                .alias("get")
+                .about("Get detailed information about a service")
+                .arg(
+                    Arg::new("service_id")
+                        .help("Service UUID or name")
+                        .required(true)
+                        .index(1),
+                ),
+        )
         .subcommand(
             Command::new("new")
                 .about("Creates a new service")
@@ -41,6 +59,8 @@ pub fn command() -> Command {
 pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches) -> Result<()> {
     let http_client = Client::new();
     match instance_matches.subcommand() {
+        Some(("list", args)) => list::list_services(&http_client, config, args).await,
+        Some(("show", args)) => info::get_service_info(&http_client, config, args).await,
         Some(("new", now_matches)) => {
             match now_matches.subcommand() {
                 Some(("tcp", args)) => {
@@ -101,4 +121,48 @@ async fn parse_target(target: &str, list: InstanceListResponse) -> Result<(Uuid,
     let port = parts[1].parse::<u16>()?;
 
     Ok((uuid, port))
+}
+
+pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) -> Result<Uuid> {
+    // First try to parse as UUID
+    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
+        return Ok(parsed_uuid);
+    }
+
+    // Try to find by name (exact match)
+    for service in &list.services {
+        if service.name == input {
+            return Ok(service.id);
+        }
+    }
+
+    // If not a valid UUID and no name match, check if it could be a UUID prefix
+    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        let starts_with_input = list
+            .services
+            .iter()
+            .filter(|service| service.id.to_string().starts_with(input))
+            .collect::<Vec<_>>();
+
+        if starts_with_input.len() == 1 {
+            return Ok(starts_with_input[0].id);
+        } else if starts_with_input.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No service found with UUID starting with '{}'",
+                input
+            ));
+        } else {
+            return Err(anyhow::anyhow!(
+                "Multiple services ({}) found with UUID starting with '{}'.",
+                starts_with_input.len(),
+                input
+            ));
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No service found with name '{}' or UUID '{}'",
+        input,
+        input
+    ))
 }
