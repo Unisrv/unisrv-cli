@@ -5,7 +5,7 @@ mod stop;
 
 use std::collections::HashMap;
 
-use crate::{config::CliConfig, instances::list::ACTIVE_STATE};
+use crate::{config::CliConfig, instances::list::RUNNING_STATE};
 use anyhow::Result;
 use clap::{Arg, Command};
 use reqwest::Client;
@@ -188,7 +188,7 @@ pub async fn resolve_uuid(input: &str, list: list::InstanceListResponse) -> Resu
         .instances
         .iter()
         .filter(|instance| {
-            instance.state == ACTIVE_STATE && instance.id.to_string().starts_with(input)
+            instance.state == RUNNING_STATE && instance.id.to_string().starts_with(input)
         })
         .collect::<Vec<_>>();
 

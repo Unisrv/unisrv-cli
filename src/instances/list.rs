@@ -7,7 +7,7 @@ use tabled::{Table, Tabled, settings::Style};
 use uuid::Uuid;
 
 static CROSS: Emoji = Emoji("❌ ", "");
-pub const ACTIVE_STATE: &str = "active";
+pub const RUNNING_STATE: &str = "running";
 
 #[derive(Deserialize)]
 pub struct InstanceListResponse {
@@ -66,7 +66,7 @@ pub async fn list_instances(
     let table = resp
         .instances
         .iter()
-        .filter(|instance| !filter_only_running || instance.state == ACTIVE_STATE)
+        .filter(|instance| !filter_only_running || instance.state == RUNNING_STATE)
         .map(|instance| InstanceTableEntry {
             id: instance.id,
             image: instance
