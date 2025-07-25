@@ -71,32 +71,29 @@ pub async fn list_networks(
         return Ok(());
     }
 
-    println!(
-        "{} {}",
-        NETWORK,
-        console::style("User-defined Networks").bold().underlined()
-    );
-    println!(
-        "{:<8} {:<20} {:<15} {:<9}",
-        console::style("ID").bold().cyan(),
-        console::style("NAME").bold().cyan(),
-        console::style("CIDR").bold().cyan(),
-        console::style("INSTANCES").bold().cyan()
-    );
-    println!("{}", "-".repeat(60));
-
+    let title_with_emoji = format!("{} User-defined Networks", NETWORK);
+    
+    let headers = vec![
+        "ID".to_string(),
+        "NAME".to_string(),
+        "CIDR".to_string(),
+        "INSTANCES".to_string()
+    ];
+    
+    let mut content = Vec::new();
     for network in network_list.networks {
         let short_id = &network.id.to_string()[..8];
         let instance_count = network.instance_count.unwrap_or(0);
-
-        println!(
-            "{:<8} {:<20} {:<15} {:<9}",
-            console::style(short_id).yellow(),
-            console::style(&network.name).green(),
-            console::style(&network.ipv4_cidr).magenta(),
-            console::style(instance_count).blue()
-        );
+        
+        content.push(vec![
+            short_id.to_string(),
+            network.name,
+            network.ipv4_cidr,
+            instance_count.to_string()
+        ]);
     }
+    
+    crate::table::draw_table(title_with_emoji, headers, content);
 
     Ok(())
 }

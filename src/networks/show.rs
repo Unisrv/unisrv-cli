@@ -72,22 +72,20 @@ fn display_network_info(network: &NetworkResponse) {
             INSTANCE,
             network.instances.len()
         );
-        println!("{}", instances_header);
-        println!("{}", "━".repeat(instances_header.len() + 5));
-        println!(
-            "{:<10} {:<15}",
-            console::style("ID").bold().cyan(),
-            console::style("IP").bold().cyan()
-        );
-        println!("{}", "-".repeat(30));
-
+        let headers = vec![
+            "ID".to_string(),
+            "IP".to_string()
+        ];
+        
+        let mut content = Vec::new();
         for instance in &network.instances {
-            println!(
-                "{:<10} {:<15}",
-                console::style(&instance.id.to_string()[..8]).yellow(),
-                console::style(&instance.internal_ip).green()
-            );
+            content.push(vec![
+                instance.id.to_string(),
+                instance.internal_ip.clone()
+            ]);
         }
+        
+        crate::table::draw_table(instances_header, headers, content);
     } else {
         println!(
             "{} No instances attached to this network",

@@ -70,22 +70,16 @@ pub async fn list_instances(
         }
     }
 
-    let title = if filter_only_running { "Running Instances" } else { "Instances" };
-    println!(
-        "{} {}",
-        INSTANCE,
-        console::style(title).bold().underlined()
-    );
-    println!();
-    println!(
-        "{:<8} {:<25} {:<12} {:<20}",
-        console::style("ID").bold().cyan(),
-        console::style("IMAGE").bold().cyan(),
-        console::style("STATE").bold().cyan(),
-        console::style("CREATED").bold().cyan()
-    );
-    println!("{}", "-".repeat(70));
-
+    let title_with_emoji = format!("{} {}", INSTANCE, if filter_only_running { "Running Instances" } else { "Instances" });
+    
+    let headers = vec![
+        "ID".to_string(),
+        "IMAGE".to_string(), 
+        "STATE".to_string(),
+        "CREATED".to_string()
+    ];
+    
+    let mut content = Vec::new();
     for instance in filtered_instances {
         let short_id = &instance.id.to_string()[..8];
         let image = instance
@@ -96,13 +90,14 @@ pub async fn list_instances(
             });
         let created_str = instance.created_at.format("%Y-%m-%d %H:%M").to_string();
         
-        println!(
-            "{:<8} {:<25} {:<12} {:<20}",
-            console::style(short_id).yellow(),
-            console::style(&image).green(),
-            console::style(&instance.state).blue(),
-            console::style(&created_str).dim()
-        );
+        content.push(vec![
+            short_id.to_string(),
+            image,
+            instance.state.clone(),
+            created_str
+        ]);
     }
+    
+    crate::table::draw_table(title_with_emoji, headers, content);
     Ok(())
 }

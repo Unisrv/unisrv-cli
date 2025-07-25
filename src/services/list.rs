@@ -47,29 +47,25 @@ pub async fn list_services(
             return Ok(());
         }
 
-        println!(
-            "{} {}",
-            SERVICE,
-            console::style("Services").bold().underlined()
-        );
-        println!();
-        println!(
-            "{:<8} {:<20} {:<10}",
-            console::style("ID").bold().cyan(),
-            console::style("NAME").bold().cyan(),
-            console::style("TYPE").bold().cyan()
-        );
-        println!("{}", "-".repeat(45));
-
+        let title_with_emoji = format!("{} Services", SERVICE);
+        
+        let headers = vec![
+            "ID".to_string(),
+            "NAME".to_string(),
+            "TYPE".to_string()
+        ];
+        
+        let mut content = Vec::new();
         for service in resp.services {
             let short_id = &service.id.to_string()[..8];
-            println!(
-                "{:<8} {:<20} {:<10}",
-                console::style(short_id).yellow(),
-                console::style(&service.name).green(),
-                console::style(&service.service_type).blue()
-            );
+            content.push(vec![
+                short_id.to_string(),
+                service.name,
+                service.service_type
+            ]);
         }
+        
+        crate::table::draw_table(title_with_emoji, headers, content);
     } else {
         error::handle_http_error(response, "list services").await?;
     }

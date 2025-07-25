@@ -96,24 +96,20 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     if !service.providers.is_empty() {
         let providers_header = format!("{} Providers ({})", PROVIDER, service.providers.len());
-        println!("{}", providers_header);
-        println!("{}", "━".repeat(header_bar_length));
-        println!(
-            "{:<10} {:<15} {}",
-            console::style("ID").bold().cyan(),
-            console::style("NODE").bold().cyan(),
-            console::style("ROUTE ADDRESS").bold().cyan()
-        );
-        println!("{}", "-".repeat(50));
-
+        let headers = vec![
+            "ID".to_string(),
+            "ROUTE ADDRESS".to_string()
+        ];
+        
+        let mut content = Vec::new();
         for provider in &service.providers {
-            println!(
-                "{:<10} {:<15} {}",
-                console::style(&provider.id.to_string()[..8]).yellow(),
-                console::style(&provider.node_id.to_string()[..8]).blue(),
-                console::style(&provider.route_address).green()
-            );
+            content.push(vec![
+                provider.id.to_string(),
+                provider.route_address.clone()
+            ]);
         }
+        
+        crate::table::draw_table(providers_header, headers, content);
         println!();
     } else {
         println!("{} No providers configured", console::style("ℹ️").dim());
@@ -122,22 +118,20 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     if !service.targets.is_empty() {
         let targets_header = format!("{} Targets ({})", TARGET, service.targets.len());
-        println!("{}", targets_header);
-        println!("{}", "━".repeat(header_bar_length));
-        println!(
-            "{:<10} {}",
-            console::style("ID").bold().cyan(),
-            console::style("INSTANCE ID").bold().cyan()
-        );
-        println!("{}", "-".repeat(30));
-
+        let headers = vec![
+            "ID".to_string(),
+            "INSTANCE ID".to_string()
+        ];
+        
+        let mut content = Vec::new();
         for target in &service.targets {
-            println!(
-                "{:<10} {}",
-                console::style(&target.id.to_string()[..8]).yellow(),
-                console::style(&target.instance_id.to_string()[..8]).green()
-            );
+            content.push(vec![
+                target.id.to_string(),
+                target.instance_id.to_string()
+            ]);
         }
+        
+        crate::table::draw_table(targets_header, headers, content);
     } else {
         println!("{} No targets configured", console::style("ℹ️").dim());
     }

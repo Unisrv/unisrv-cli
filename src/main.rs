@@ -12,6 +12,7 @@ mod instances;
 mod login;
 mod networks;
 mod services;
+mod table;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
