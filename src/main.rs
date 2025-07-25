@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod instances;
 mod login;
+mod networks;
 mod services;
 
 #[tokio::main(flavor = "current_thread")]
@@ -23,6 +24,7 @@ async fn main() -> Result<(), Error> {
         .about("Provisioning CLI for managing instances")
         .subcommand_required(true)
         .subcommand(instances::command())
+        .subcommand(networks::command())
         .subcommand(services::command())
         .subcommand(login::command())
         .subcommand(auth::command())
@@ -34,6 +36,7 @@ async fn main() -> Result<(), Error> {
         Some(("instance", instance_matches)) => {
             instances::handle(&mut config, instance_matches).await
         }
+        Some(("network", network_matches)) => networks::handle(&mut config, network_matches).await,
         Some(("service", instance_matches)) => {
             services::handle(&mut config, instance_matches).await
         }

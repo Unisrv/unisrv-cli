@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tabled::{settings::Style, Table, Tabled};
+use tabled::{Table, Tabled, settings::Style};
 use uuid::Uuid;
 
 use crate::{config::CliConfig, default_spinner, error};
@@ -37,7 +37,7 @@ pub async fn list_services(
 
     if response.status().is_success() {
         let resp: ServiceListResponse = response.json().await?;
-        
+
         if resp.services.is_empty() {
             println!("No services found.");
             return Ok(());

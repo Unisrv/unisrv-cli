@@ -1,6 +1,5 @@
 use crate::{config::CliConfig, default_spinner, error};
 use anyhow::{Ok, Result};
-use console::Emoji;
 use reqwest::Client;
 use serde::Deserialize;
 use tabled::{Table, Tabled, settings::Style};

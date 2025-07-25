@@ -41,16 +41,14 @@ pub async fn get_service_info(
     args: &clap::ArgMatches,
 ) -> Result<()> {
     let service_id = args.get_one::<String>("service_id").unwrap();
-    
+
     let progress = default_spinner();
     progress.set_prefix("Resolving service...");
-    
+
     // Resolve service ID (could be UUID or name)
-    let resolved_id = super::resolve_service_id(
-        service_id, 
-        super::list::list(client, config).await?
-    ).await?;
-    
+    let resolved_id =
+        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+
     progress.set_prefix("Loading service info...");
 
     let response = client
