@@ -1,4 +1,4 @@
-use console::{style, Term};
+use console::{Term, style};
 
 const COLORS: [fn(&str) -> console::StyledObject<&str>; 6] = [
     |s| style(s).yellow(),
@@ -17,7 +17,11 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
 
     // Get terminal width, default to 80 if unavailable
     let terminal_width = Term::stdout().size().1 as usize;
-    let max_width = if terminal_width > 10 { terminal_width } else { 80 };
+    let max_width = if terminal_width > 10 {
+        terminal_width
+    } else {
+        80
+    };
 
     // Calculate column widths intelligently
     let num_cols = headers.len();
@@ -42,10 +46,11 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
     let total_content_width: usize = col_widths.iter().sum::<usize>() + separator_space;
 
     // If content is too wide, proportionally reduce column widths
-    if total_content_width > max_width - 4 { // Leave some margin
+    if total_content_width > max_width - 4 {
+        // Leave some margin
         let available_width = max_width - 4 - separator_space;
         let scale_factor = available_width as f64 / col_widths.iter().sum::<usize>() as f64;
-        
+
         for width in &mut col_widths {
             *width = (*width as f64 * scale_factor).max(4.0) as usize; // Minimum 4 chars per column
         }
@@ -53,7 +58,7 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
 
     // Calculate the final content width (columns + separators)
     let final_content_width = col_widths.iter().sum::<usize>() + separator_space;
-    
+
     // Calculate bar lengths:
     // - Header bar: longest of table header or final content width
     // - Column separator bar: final content width only
@@ -70,8 +75,9 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
         if i > 0 {
             header_line.push_str("  ");
         }
-        header_line.push_str(&format!("{:<width$}", 
-            style(header).bold().cyan(), 
+        header_line.push_str(&format!(
+            "{:<width$}",
+            style(header).bold().cyan(),
             width = col_widths[i]
         ));
     }
@@ -87,7 +93,7 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
             if i >= col_widths.len() {
                 break;
             }
-            
+
             if i > 0 {
                 row_line.push_str("  ");
             }
@@ -107,4 +113,32 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
         }
         println!("{}", row_line);
     }
+}
+
+pub fn draw_info_section(header: String, fields: Vec<(String, console::StyledObject<String>)>) {
+    // Calculate the maximum bar length from header and any potential content
+
+    let max_key_len = fields.iter().map(|(k, _)| k.len() + 1).max().unwrap_or(0);
+    let max_value_len = fields
+        .iter()
+        .map(|(_, v)| v.to_string().chars().count())
+        .max()
+        .unwrap_or(0);
+    let header_bar_length = header.len().max(max_key_len + max_value_len);
+
+    // Draw header with separator bar
+    println!("{}", style(&header).bold());
+    println!("{}", "━".repeat(header_bar_length));
+
+    // Draw key-value pairs
+    for (key, value) in fields.iter() {
+        // Find the longest key for alignment
+        println!(
+            "{:<width$}\t {}",
+            format!("{}:", key),
+            value,
+            width = max_key_len
+        );
+    }
+    println!();
 }

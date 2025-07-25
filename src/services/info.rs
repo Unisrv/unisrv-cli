@@ -76,39 +76,39 @@ pub async fn get_service_info(
 
 fn display_service_info(service: &ServiceInfoResponse) {
     let header = format!("{} Service {}", SERVICE, service.id);
-    let header_bar_length = header.len();
-    println!("{}", console::style(&header).bold());
-    println!("{}", "━".repeat(header_bar_length));
-    println!(
-        "Name:         {}",
-        console::style(&service.name).bold().green()
-    );
-    println!("ID:           {}", console::style(&service.id).yellow());
-    println!(
-        "Type:         {}",
-        console::style(&service.service_type).cyan()
-    );
-    println!(
-        "Created:      {}",
-        console::style(&service.created_at).dim()
-    );
-    println!();
+    let fields = vec![
+        (
+            "Name".to_string(),
+            console::style(service.name.clone()).bold().green(),
+        ),
+        (
+            "ID".to_string(),
+            console::style(service.id.to_string()).yellow(),
+        ),
+        (
+            "Type".to_string(),
+            console::style(service.service_type.clone()).cyan(),
+        ),
+        (
+            "Created".to_string(),
+            console::style(service.created_at.clone()).dim(),
+        ),
+    ];
+
+    crate::table::draw_info_section(header, fields);
 
     if !service.providers.is_empty() {
         let providers_header = format!("{} Providers ({})", PROVIDER, service.providers.len());
-        let headers = vec![
-            "ID".to_string(),
-            "ROUTE ADDRESS".to_string()
-        ];
-        
+        let headers = vec!["ID".to_string(), "ROUTE ADDRESS".to_string()];
+
         let mut content = Vec::new();
         for provider in &service.providers {
             content.push(vec![
                 provider.id.to_string(),
-                provider.route_address.clone()
+                provider.route_address.clone(),
             ]);
         }
-        
+
         crate::table::draw_table(providers_header, headers, content);
         println!();
     } else {
@@ -118,19 +118,13 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     if !service.targets.is_empty() {
         let targets_header = format!("{} Targets ({})", TARGET, service.targets.len());
-        let headers = vec![
-            "ID".to_string(),
-            "INSTANCE ID".to_string()
-        ];
-        
+        let headers = vec!["ID".to_string(), "INSTANCE ID".to_string()];
+
         let mut content = Vec::new();
         for target in &service.targets {
-            content.push(vec![
-                target.id.to_string(),
-                target.instance_id.to_string()
-            ]);
+            content.push(vec![target.id.to_string(), target.instance_id.to_string()]);
         }
-        
+
         crate::table::draw_table(targets_header, headers, content);
     } else {
         println!("{} No targets configured", console::style("ℹ️").dim());

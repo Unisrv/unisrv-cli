@@ -49,22 +49,26 @@ pub async fn show_network(
 
 fn display_network_info(network: &NetworkResponse) {
     let header = format!("{} Network {}", NETWORK, network.id);
-    println!("{}", console::style(&header).bold());
-    println!("{}", "━".repeat(header.len() + 5));
-    println!(
-        "Name:         {}",
-        console::style(&network.name).bold().green()
-    );
-    println!("ID:           {}", console::style(&network.id).yellow());
-    println!(
-        "CIDR:         {}",
-        console::style(&network.ipv4_cidr).cyan()
-    );
-    println!(
-        "Created:      {}",
-        console::style(&network.created_at).dim()
-    );
-    println!();
+    let fields = vec![
+        (
+            "Name".to_string(),
+            console::style(network.name.clone()).bold().green(),
+        ),
+        (
+            "ID".to_string(),
+            console::style(network.id.to_string()).yellow(),
+        ),
+        (
+            "CIDR".to_string(),
+            console::style(network.ipv4_cidr.clone()).cyan(),
+        ),
+        (
+            "Created".to_string(),
+            console::style(network.created_at.to_string()).dim(),
+        ),
+    ];
+
+    crate::table::draw_info_section(header, fields);
 
     if !network.instances.is_empty() {
         let instances_header = format!(
@@ -72,19 +76,13 @@ fn display_network_info(network: &NetworkResponse) {
             INSTANCE,
             network.instances.len()
         );
-        let headers = vec![
-            "ID".to_string(),
-            "IP".to_string()
-        ];
-        
+        let headers = vec!["ID".to_string(), "IP".to_string()];
+
         let mut content = Vec::new();
         for instance in &network.instances {
-            content.push(vec![
-                instance.id.to_string(),
-                instance.internal_ip.clone()
-            ]);
+            content.push(vec![instance.id.to_string(), instance.internal_ip.clone()]);
         }
-        
+
         crate::table::draw_table(instances_header, headers, content);
     } else {
         println!(
