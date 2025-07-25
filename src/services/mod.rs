@@ -8,9 +8,11 @@ use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
 
+mod delete;
 mod info;
 mod list;
 mod new;
+mod target;
 
 pub fn command() -> Command {
     Command::new("service")
@@ -32,6 +34,55 @@ pub fn command() -> Command {
                         .help("Service UUID or name")
                         .required(true)
                         .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("delete")
+                .alias("rm")
+                .about("Delete a service")
+                .arg(
+                    Arg::new("service_id")
+                        .help("Service UUID or name")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("target")
+                .about("Manage service targets")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("add")
+                        .about("Add a target to a service")
+                        .arg(
+                            Arg::new("service_id")
+                                .help("Service UUID or name")
+                                .required(true)
+                                .index(1),
+                        )
+                        .arg(
+                            Arg::new("target")
+                                .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
+                                .required(true)
+                                .index(2),
+                        ),
+                )
+                .subcommand(
+                    Command::new("delete")
+                        .alias("rm")
+                        .about("Delete a target from a service")
+                        .arg(
+                            Arg::new("service_id")
+                                .help("Service UUID or name")
+                                .required(true)
+                                .index(1),
+                        )
+                        .arg(
+                            Arg::new("target_id")
+                                .help("Target UUID")
+                                .required(true)
+                                .index(2),
+                        ),
                 ),
         )
         .subcommand(
@@ -63,6 +114,17 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
     match instance_matches.subcommand() {
         Some(("list", args)) => list::list_services(&http_client, config, args).await,
         Some(("show", args)) => info::get_service_info(&http_client, config, args).await,
+        Some(("delete", args)) => delete::delete_service(&http_client, config, args).await,
+        Some(("target", target_matches)) => {
+            match target_matches.subcommand() {
+                Some(("add", args)) => target::add_target(&http_client, config, args).await,
+                Some(("delete", args)) => target::delete_target(&http_client, config, args).await,
+                _ => {
+                    eprintln!("Unknown target command");
+                    Ok(())
+                }
+            }
+        }
         Some(("new", now_matches)) => {
             match now_matches.subcommand() {
                 Some(("tcp", args)) => {

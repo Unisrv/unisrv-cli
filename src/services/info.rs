@@ -1,10 +1,15 @@
 use anyhow::Result;
+use console::Emoji;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{config::CliConfig, default_spinner, error};
+
+static SERVICE: Emoji = Emoji("🔌 ", "");
+static PROVIDER: Emoji = Emoji("🌐 ", "");
+static TARGET: Emoji = Emoji("🎯 ", "");
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceProvider {
@@ -70,28 +75,70 @@ pub async fn get_service_info(
 }
 
 fn display_service_info(service: &ServiceInfoResponse) {
-    println!("🔧 Service Information");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Name:         {}", service.name);
-    println!("ID:           {}", service.id);
-    println!("Type:         {}", service.service_type);
-    println!("Created:      {}", service.created_at);
+    let header = format!("{} Service {}", SERVICE, service.id);
+    let header_bar_length = header.len();
+    println!("{}", console::style(&header).bold());
+    println!("{}", "━".repeat(header_bar_length));
+    println!(
+        "Name:         {}",
+        console::style(&service.name).bold().green()
+    );
+    println!("ID:           {}", console::style(&service.id).yellow());
+    println!(
+        "Type:         {}",
+        console::style(&service.service_type).cyan()
+    );
+    println!(
+        "Created:      {}",
+        console::style(&service.created_at).dim()
+    );
     println!();
 
     if !service.providers.is_empty() {
-        println!("🌐 Providers ({}):", service.providers.len());
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        let providers_header = format!("{} Providers ({})", PROVIDER, service.providers.len());
+        println!("{}", providers_header);
+        println!("{}", "━".repeat(header_bar_length));
+        println!(
+            "{:<10} {:<15} {}",
+            console::style("ID").bold().cyan(),
+            console::style("NODE").bold().cyan(),
+            console::style("ROUTE ADDRESS").bold().cyan()
+        );
+        println!("{}", "-".repeat(50));
+
         for provider in &service.providers {
-            println!("  • Route: {}", provider.route_address);
+            println!(
+                "{:<10} {:<15} {}",
+                console::style(&provider.id.to_string()[..8]).yellow(),
+                console::style(&provider.node_id.to_string()[..8]).blue(),
+                console::style(&provider.route_address).green()
+            );
         }
+        println!();
+    } else {
+        println!("{} No providers configured", console::style("ℹ️").dim());
         println!();
     }
 
     if !service.targets.is_empty() {
-        println!("🎯 Targets ({}):", service.targets.len());
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        let targets_header = format!("{} Targets ({})", TARGET, service.targets.len());
+        println!("{}", targets_header);
+        println!("{}", "━".repeat(header_bar_length));
+        println!(
+            "{:<10} {}",
+            console::style("ID").bold().cyan(),
+            console::style("INSTANCE ID").bold().cyan()
+        );
+        println!("{}", "-".repeat(30));
+
         for target in &service.targets {
-            println!("  • Instance: {}", target.instance_id);
+            println!(
+                "{:<10} {}",
+                console::style(&target.id.to_string()[..8]).yellow(),
+                console::style(&target.instance_id.to_string()[..8]).green()
+            );
         }
+    } else {
+        println!("{} No targets configured", console::style("ℹ️").dim());
     }
 }
