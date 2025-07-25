@@ -14,8 +14,10 @@ mod new;
 
 pub fn command() -> Command {
     Command::new("service")
+        .alias("srv")
+        .alias("services")
         .about("Manage services")
-        .subcommand_required(true)
+        .subcommand_required(false)
         .subcommand(
             Command::new("list")
                 .about("List all services")
@@ -103,8 +105,14 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             }
             Ok(())
         }
-        Some((_, _)) => todo!(),
-        None => unreachable!(),
+        Some((_, _)) => {
+            eprintln!("Unknown service command");
+            Ok(())
+        }
+        None => {
+            // Default to listing services when no subcommand is provided
+            list::list_services(&http_client, config, &clap::ArgMatches::default()).await
+        }
     }
 }
 

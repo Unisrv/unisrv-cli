@@ -11,8 +11,10 @@ mod show;
 
 pub fn command() -> Command {
     Command::new("network")
+        .alias("net")
+        .alias("networks")
         .about("Manage networks")
-        .subcommand_required(true)
+        .subcommand_required(false)
         .subcommand(
             Command::new("new")
                 .about("Create a new internal network")
@@ -71,7 +73,10 @@ pub async fn handle(config: &mut CliConfig, network_matches: &clap::ArgMatches) 
             eprintln!("Unknown network command");
             Ok(())
         }
-        None => unreachable!(),
+        None => {
+            // Default to listing networks when no subcommand is provided
+            list::list_networks(&http_client, config, &clap::ArgMatches::default()).await
+        }
     }
 }
 

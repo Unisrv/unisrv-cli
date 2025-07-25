@@ -1,12 +1,15 @@
 use anyhow::Result;
+use console::Emoji;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tabled::{Table, Tabled, settings::Style};
 use uuid::Uuid;
 
 use crate::{config::CliConfig, default_spinner, error};
 
-#[derive(Serialize, Deserialize, Debug, Tabled)]
+static SERVICE: Emoji = Emoji("🔧 ", "");
+static LIST: Emoji = Emoji("📋 ", "");
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Service {
     pub id: Uuid,
     pub name: String,
@@ -25,7 +28,8 @@ pub async fn list_services(
     _args: &clap::ArgMatches,
 ) -> Result<()> {
     let progress = default_spinner();
-    progress.set_prefix("Loading services...");
+    progress.set_prefix("Loading services");
+    progress.set_message(format!("{} Loading service list...", LIST));
 
     let response = client
         .get(&config.url("/services"))
@@ -39,13 +43,33 @@ pub async fn list_services(
         let resp: ServiceListResponse = response.json().await?;
 
         if resp.services.is_empty() {
-            println!("No services found.");
+            println!("{} No services found.", console::style("ℹ️").dim());
             return Ok(());
         }
 
-        let mut table: Table = Table::new(resp.services.iter());
-        table.with(Style::modern_rounded());
-        println!("{}", table);
+        println!(
+            "{} {}",
+            SERVICE,
+            console::style("Services").bold().underlined()
+        );
+        println!();
+        println!(
+            "{:<8} {:<20} {:<10}",
+            console::style("ID").bold().cyan(),
+            console::style("NAME").bold().cyan(),
+            console::style("TYPE").bold().cyan()
+        );
+        println!("{}", "-".repeat(45));
+
+        for service in resp.services {
+            let short_id = &service.id.to_string()[..8];
+            println!(
+                "{:<8} {:<20} {:<10}",
+                console::style(short_id).yellow(),
+                console::style(&service.name).green(),
+                console::style(&service.service_type).blue()
+            );
+        }
     } else {
         error::handle_http_error(response, "list services").await?;
     }

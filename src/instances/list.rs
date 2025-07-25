@@ -1,9 +1,12 @@
 use crate::{config::CliConfig, default_spinner, error};
 use anyhow::{Ok, Result};
+use console::Emoji;
 use reqwest::Client;
 use serde::Deserialize;
-use tabled::{Table, Tabled, settings::Style};
 use uuid::Uuid;
+
+static INSTANCE: Emoji = Emoji("💻 ", "");
+static LIST: Emoji = Emoji("📋 ", "");
 
 pub const RUNNING_STATE: &str = "running";
 
@@ -22,17 +25,6 @@ pub struct InstanceResponse {
     // updated_at: chrono::NaiveDateTime,
 }
 
-#[derive(Tabled)]
-struct InstanceTableEntry {
-    #[tabled(rename = "Created At")]
-    created_at: chrono::NaiveDateTime,
-    #[tabled(rename = "Id")]
-    id: Uuid,
-    #[tabled(rename = "Image")]
-    image: String,
-    #[tabled(rename = "State")]
-    state: String,
-}
 
 pub async fn list(client: &Client, config: &mut CliConfig) -> Result<InstanceListResponse> {
     let response = client
@@ -56,39 +48,61 @@ pub async fn list_instances(
     filter_only_running: bool,
 ) -> Result<()> {
     let progress = default_spinner();
-    let _ = progress.set_prefix("Listing instances");
+    progress.set_prefix("Listing instances");
+    progress.set_message(format!("{} Loading instance list...", LIST));
     let resp = list(client, config).await;
     progress.finish_and_clear();
     let resp = resp?;
 
-    let table = resp
+    let filtered_instances: Vec<&InstanceResponse> = resp
         .instances
         .iter()
         .filter(|instance| !filter_only_running || instance.state == RUNNING_STATE)
-        .map(|instance| InstanceTableEntry {
-            id: instance.id,
-            image: instance
-                .configuration
-                .get("container_image")
-                .map_or("Unknown".to_string(), |img| {
-                    img.as_str().unwrap_or("Unknown").to_string()
-                }),
-            state: instance.state.clone(),
-            created_at: instance.created_at,
-        })
-        .collect::<Vec<_>>();
-    if table.is_empty() {
+        .collect();
+
+    if filtered_instances.is_empty() {
         if filter_only_running {
-            eprintln!("No running instances found.");
+            println!("{} No running instances found.", console::style("ℹ️").dim());
             return Ok(());
         } else {
-            eprintln!("No instances found. How about running one?");
+            println!("{} No instances found. How about running one?", console::style("ℹ️").dim());
             return Ok(());
         }
     }
 
-    let mut table: Table = Table::new(table.iter());
-    table.with(Style::modern_rounded());
-    eprintln!("{}", table);
+    let title = if filter_only_running { "Running Instances" } else { "Instances" };
+    println!(
+        "{} {}",
+        INSTANCE,
+        console::style(title).bold().underlined()
+    );
+    println!();
+    println!(
+        "{:<8} {:<25} {:<12} {:<20}",
+        console::style("ID").bold().cyan(),
+        console::style("IMAGE").bold().cyan(),
+        console::style("STATE").bold().cyan(),
+        console::style("CREATED").bold().cyan()
+    );
+    println!("{}", "-".repeat(70));
+
+    for instance in filtered_instances {
+        let short_id = &instance.id.to_string()[..8];
+        let image = instance
+            .configuration
+            .get("container_image")
+            .map_or("Unknown".to_string(), |img| {
+                img.as_str().unwrap_or("Unknown").to_string()
+            });
+        let created_str = instance.created_at.format("%Y-%m-%d %H:%M").to_string();
+        
+        println!(
+            "{:<8} {:<25} {:<12} {:<20}",
+            console::style(short_id).yellow(),
+            console::style(&image).green(),
+            console::style(&instance.state).blue(),
+            console::style(&created_str).dim()
+        );
+    }
     Ok(())
 }

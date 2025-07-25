@@ -13,8 +13,10 @@ use uuid::Uuid;
 
 pub fn command() -> Command {
     Command::new("instance")
+        .alias("vm")
+        .alias("instances")
         .about("Manage instances")
-        .subcommand_required(true)
+        .subcommand_required(false)
         .subcommand(
             Command::new("run")
                 .about("Run a new instance with a specified container image")
@@ -147,7 +149,12 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             let uuid = resolve_uuid(uuid, list::list(&http_client, config).await?).await?;
             logs::stream_logs(&http_client, config, uuid, None).await
         }
-        _ => Err(anyhow::anyhow!("Unknown instance command")),
+        Some((_, _)) => Err(anyhow::anyhow!("Unknown instance command")),
+        None => {
+            // Default to listing instances when no subcommand is provided
+            config.ensure_auth()?;
+            list::list_instances(&http_client, config, true).await
+        }
     }
 }
 

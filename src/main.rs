@@ -37,9 +37,7 @@ async fn main() -> Result<(), Error> {
             instances::handle(&mut config, instance_matches).await
         }
         Some(("network", network_matches)) => networks::handle(&mut config, network_matches).await,
-        Some(("service", instance_matches)) => {
-            services::handle(&mut config, instance_matches).await
-        }
+        Some(("service", service_matches)) => services::handle(&mut config, service_matches).await,
         Some(("login", instance_matches)) => login::handle(&mut config, instance_matches).await,
         Some(("auth", instance_matches)) => auth::handle(&mut config, instance_matches).await,
         _ => {
