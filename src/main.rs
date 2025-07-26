@@ -1,18 +1,6 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use clap::Command;
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Error;
-
-mod auth;
-mod config;
-mod error;
-mod instances;
-mod login;
-mod networks;
-mod services;
-mod table;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -24,23 +12,31 @@ async fn main() -> Result<(), Error> {
         .author("Caspar Norée Palm <caspar.noreepalm@gmail.com>")
         .about("Provisioning CLI for managing instances")
         .subcommand_required(true)
-        .subcommand(instances::command())
-        .subcommand(networks::command())
-        .subcommand(services::command())
-        .subcommand(login::command())
-        .subcommand(auth::command())
+        .subcommand(unisrv::instances::command())
+        .subcommand(unisrv::networks::command())
+        .subcommand(unisrv::services::command())
+        .subcommand(unisrv::login::command())
+        .subcommand(unisrv::auth::command())
         .get_matches();
-    let mut config = config::CliConfig::init();
+    let mut config = unisrv::config::CliConfig::init();
 
     // Match on the subcommands and handle logic
     let r = match matches.subcommand() {
         Some(("instance", instance_matches)) => {
-            instances::handle(&mut config, instance_matches).await
+            unisrv::instances::handle(&mut config, instance_matches).await
         }
-        Some(("network", network_matches)) => networks::handle(&mut config, network_matches).await,
-        Some(("service", service_matches)) => services::handle(&mut config, service_matches).await,
-        Some(("login", instance_matches)) => login::handle(&mut config, instance_matches).await,
-        Some(("auth", instance_matches)) => auth::handle(&mut config, instance_matches).await,
+        Some(("network", network_matches)) => {
+            unisrv::networks::handle(&mut config, network_matches).await
+        }
+        Some(("service", service_matches)) => {
+            unisrv::services::handle(&mut config, service_matches).await
+        }
+        Some(("login", instance_matches)) => {
+            unisrv::login::handle(&mut config, instance_matches).await
+        }
+        Some(("auth", instance_matches)) => {
+            unisrv::auth::handle(&mut config, instance_matches).await
+        }
         _ => {
             eprintln!("Unknown command");
             Ok(())
@@ -54,15 +50,4 @@ async fn main() -> Result<(), Error> {
     }
 
     Ok(())
-}
-
-pub fn default_spinner() -> ProgressBar {
-    let spinner_style = ProgressStyle::with_template("{spinner} {prefix:.bold.dim} {wide_msg}")
-        .unwrap()
-        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
-
-    let progress = ProgressBar::new_spinner();
-    progress.set_style(spinner_style);
-    progress.enable_steady_tick(Duration::from_millis(50));
-    progress
 }
