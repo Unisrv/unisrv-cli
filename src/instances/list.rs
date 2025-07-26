@@ -18,11 +18,14 @@ pub struct InstanceListResponse {
 #[derive(Deserialize)]
 pub struct InstanceResponse {
     pub id: Uuid,
-    configuration: serde_json::Value,
+    /// Optional name for the instance.
+    pub name: Option<String>,
+    /// The current state of the instance.
     pub state: String,
-    // exit_reason: Option<String>,
-    created_at: chrono::NaiveDateTime,
-    // updated_at: chrono::NaiveDateTime,
+    /// The container image reference.
+    pub container_image: String,
+    /// The timestamp when the instance was created.
+    pub created_at: chrono::NaiveDateTime,
 }
 
 pub async fn list(client: &Client, config: &mut CliConfig) -> Result<InstanceListResponse> {
@@ -84,6 +87,7 @@ pub async fn list_instances(
 
     let headers = vec![
         "ID".to_string(),
+        "NAME".to_string(),
         "IMAGE".to_string(),
         "STATE".to_string(),
         "CREATED".to_string(),
@@ -92,17 +96,14 @@ pub async fn list_instances(
     let mut content = Vec::new();
     for instance in filtered_instances {
         let short_id = &instance.id.to_string()[..8];
-        let image = instance
-            .configuration
-            .get("container_image")
-            .map_or("Unknown".to_string(), |img| {
-                img.as_str().unwrap_or("Unknown").to_string()
-            });
+        let name = instance.name.as_deref().unwrap_or("<unnamed>");
+        let image = &instance.container_image;
         let created_str = instance.created_at.format("%Y-%m-%d %H:%M").to_string();
 
         content.push(vec![
             short_id.to_string(),
-            image,
+            name.to_string(),
+            image.to_string(),
             instance.state.clone(),
             created_str,
         ]);

@@ -17,6 +17,7 @@ pub struct RunInstanceParams<'a> {
     pub memory_mb: u32,
     pub args: Option<Vec<String>>,
     pub env: Option<HashMap<String, String>>,
+    pub name: Option<String>,
     pub network: Option<String>,
 }
 
@@ -93,6 +94,7 @@ pub async fn run_instance(
         "vcpu_ratio": 1.0,
         "vcpu_count": params.vcpu_count,
         "memory_mb": params.memory_mb,
+        "name": params.name,
         "configuration": {
             "container_image": params.container_image,
             "args": params.args,

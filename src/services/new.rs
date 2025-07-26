@@ -7,6 +7,7 @@ use crate::config::CliConfig;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
 pub enum ServiceConfiguration {
     #[serde(alias = "tcp")]
     #[serde(alias = "TCP")]

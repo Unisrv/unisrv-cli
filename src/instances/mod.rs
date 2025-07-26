@@ -1,6 +1,7 @@
 pub mod list;
 mod logs;
 mod run;
+mod show;
 mod stop;
 
 use std::collections::HashMap;
@@ -50,10 +51,16 @@ pub fn command() -> Command {
                         .short('e')
                 )
                 .arg(
+                    Arg::new("name")
+                        .help("Optional name for the instance")
+                        .long("name")
+                        .short('n')
+                        .value_name("NAME")
+                )
+                .arg(
                     Arg::new("network")
                         .help("Join instance to network, format: [ip]@<network_id/name> (IP is optional - will auto-assign if omitted)")
                         .long("network")
-                        .short('n')
                         .value_name("[IP]@NETWORK")
                 )
                 .arg(
@@ -66,10 +73,10 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("stop")
                 .alias("rm")
-                .about("Stop an instance by UUID")
+                .about("Stop an instance by UUID, name, or UUID prefix")
                 .arg(
                     Arg::new("uuid")
-                        .help("The UUID of the instance to terminate")
+                        .help("The UUID, name, or UUID prefix of the instance to terminate")
                         .required(true),
                 ).arg(
                     Arg::new("timeout")
@@ -89,13 +96,25 @@ pub fn command() -> Command {
                 .action(clap::ArgAction::SetTrue),
         ))
         .subcommand(
+            Command::new("show")
+                .about("Show detailed information about a specific instance")
+                .alias("get")
+                .alias("info")
+                .arg_required_else_help(true)
+                .arg(
+                    Arg::new("instance_id")
+                        .help("The UUID, name, or UUID prefix of the instance to show")
+                        .required(true),
+                )
+        )
+        .subcommand(
             Command::new("logs")
                 .about("Stream logs for a specific instance")
                 .alias("log")
                 .arg_required_else_help(true)
                 .arg(
                     Arg::new("uuid")
-                        .help("The UUID of the instance to stream logs for")
+                        .help("The UUID, name, or UUID prefix of the instance to stream logs for")
                         .required(true),
                 )
             )
@@ -112,6 +131,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             let args = run_matches
                 .get_many::<String>("args")
                 .map(|v| v.cloned().collect());
+            let name = run_matches.get_one::<String>("name").cloned();
             let network = run_matches.get_one::<String>("network").cloned();
             run::run_instance(
                 &http_client,
@@ -124,6 +144,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
                     memory_mb: memory_mb as u32,
                     args,
                     env,
+                    name,
                     network,
                 },
             )
@@ -151,6 +172,10 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
                     .unwrap_or(&false),
             )
             .await
+        }
+        Some(("show", show_matches)) => {
+            config.ensure_auth()?;
+            show::show_instance(&http_client, config, show_matches).await
         }
         Some(("logs", logs_matches)) => {
             config.ensure_auth()?;
@@ -233,37 +258,51 @@ fn parse_memory_mb(s: &str) -> Result<u16, String> {
 }
 
 pub async fn resolve_uuid(input: &str, list: list::InstanceListResponse) -> Result<Uuid> {
+    // First try to parse as UUID
     if let Ok(parsed_uuid) = Uuid::parse_str(input) {
         return Ok(parsed_uuid);
     }
 
-    // check that the input string only is hexadecimal characters and -
-    if !input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        return Err(anyhow::anyhow!(
-            "Invalid id format: '{}'. Only hexadecimal characters and '-' are allowed.",
-            input
-        ));
+    // Try to find by name (exact match) - only check running instances
+    for instance in &list.instances {
+        if instance.state == RUNNING_STATE {
+            if let Some(ref name) = instance.name {
+                if name == input {
+                    return Ok(instance.id);
+                }
+            }
+        }
     }
-    let starts_with_input = list
-        .instances
-        .iter()
-        .filter(|instance| {
-            instance.state == RUNNING_STATE && instance.id.to_string().starts_with(input)
-        })
-        .collect::<Vec<_>>();
 
-    if starts_with_input.len() == 1 {
-        Ok(starts_with_input[0].id)
-    } else if starts_with_input.is_empty() {
-        Err(anyhow::anyhow!(
-            "No instance found with UUID starting with '{}'",
-            input
-        ))
-    } else {
-        Err(anyhow::anyhow!(
-            "Multiple instances ({}) found with UUID starting with '{}'.",
-            starts_with_input.len(),
-            input
-        ))
+    // If not a valid UUID and no name match, check if it could be a UUID prefix
+    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        let starts_with_input = list
+            .instances
+            .iter()
+            .filter(|instance| {
+                instance.state == RUNNING_STATE && instance.id.to_string().starts_with(input)
+            })
+            .collect::<Vec<_>>();
+
+        if starts_with_input.len() == 1 {
+            return Ok(starts_with_input[0].id);
+        } else if starts_with_input.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No running instance found with UUID starting with '{}'",
+                input
+            ));
+        } else {
+            return Err(anyhow::anyhow!(
+                "Multiple instances ({}) found with UUID starting with '{}'.",
+                starts_with_input.len(),
+                input
+            ));
+        }
     }
+
+    Err(anyhow::anyhow!(
+        "No running instance found with name '{}' or UUID '{}'",
+        input,
+        input
+    ))
 }

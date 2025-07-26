@@ -28,6 +28,7 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("show")
                 .alias("get")
+                .alias("info")
                 .about("Get detailed information about a service")
                 .arg(
                     Arg::new("service_id")

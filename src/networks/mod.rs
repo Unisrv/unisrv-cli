@@ -35,6 +35,7 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("show")
                 .alias("get")
+                .alias("info")
                 .about("Get detailed information about a network")
                 .arg(
                     Arg::new("network_id")
