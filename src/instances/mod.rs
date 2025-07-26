@@ -36,12 +36,12 @@ pub fn command() -> Command {
                 )
                 .arg(
                     Arg::new("memory_mb")
-                        .help("Amount of memory in MB to allocate for the instance [128-65535]")
+                        .help("Amount of memory in GB (G) or MB (M) to allocate for the instance [128M-128G]")
                         .long("memory")
                         .short('m')
-                        .value_parser(clap::value_parser!(u16).range(128..=65535))
+                        .value_parser(parse_memory_mb)
                         .allow_negative_numbers(false)
-                        .default_value("1024"),
+                        .default_value("1024M"),
                 )
                 .arg(
                     Arg::new("env")
@@ -177,6 +177,48 @@ fn parse_env_vars(
     } else {
         Ok(None)
     }
+}
+
+fn parse_memory_mb(s: &str) -> Result<u16, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Memory value cannot be empty".to_string());
+    }
+    let (num_str, unit) = match s.chars().last() {
+        Some(c) if !c.is_ascii_digit() => {
+            let unit = c.to_ascii_uppercase();
+            let num_str = &s[..s.len() - 1];
+            if !num_str.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err(
+                    "Memory value must be a number followed by an optional unit (M/G)".to_string(),
+                );
+            }
+            (num_str, unit)
+        }
+        _ => {
+            if !s.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err(
+                    "Memory value must be a number, optionally followed by an unit (M/G)"
+                        .to_string(),
+                );
+            }
+            (s, 'M') // Default to MB if no suffix
+        }
+    };
+    let num: u32 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number: {}", num_str))?;
+    let mb = match unit {
+        'M' => num,
+        'G' => num
+            .checked_mul(1024)
+            .ok_or("Memory must be between 128M and 128G")?,
+        _ => return Err(format!("Invalid memory unit: {}", unit)),
+    };
+    if mb < 128 || mb > 131072 {
+        return Err(format!("Memory must be between 128M and 128G ({} MB)", mb));
+    }
+    Ok(mb as u16)
 }
 
 pub async fn resolve_uuid(input: &str, list: list::InstanceListResponse) -> Result<Uuid> {
