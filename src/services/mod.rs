@@ -115,16 +115,14 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
         Some(("list", args)) => list::list_services(&http_client, config, args).await,
         Some(("show", args)) => info::get_service_info(&http_client, config, args).await,
         Some(("delete", args)) => delete::delete_service(&http_client, config, args).await,
-        Some(("target", target_matches)) => {
-            match target_matches.subcommand() {
-                Some(("add", args)) => target::add_target(&http_client, config, args).await,
-                Some(("delete", args)) => target::delete_target(&http_client, config, args).await,
-                _ => {
-                    eprintln!("Unknown target command");
-                    Ok(())
-                }
+        Some(("target", target_matches)) => match target_matches.subcommand() {
+            Some(("add", args)) => target::add_target(&http_client, config, args).await,
+            Some(("delete", args)) => target::delete_target(&http_client, config, args).await,
+            _ => {
+                eprintln!("Unknown target command");
+                Ok(())
             }
-        }
+        },
         Some(("new", now_matches)) => {
             match now_matches.subcommand() {
                 Some(("tcp", args)) => {
@@ -152,7 +150,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
                     let request = new::ServiceProvisionRequest {
                         region: "dev".to_string(),
                         name: name.to_string(),
-                        configuration: new::ServiceConfiguration::TCP,
+                        configuration: new::ServiceConfiguration::Tcp,
                         instance_targets: parsed_targets,
                     };
                     let response = new::new_service(request, &http_client, config).await?;

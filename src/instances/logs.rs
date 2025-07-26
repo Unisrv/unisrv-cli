@@ -20,7 +20,7 @@ pub async fn stream_logs(
     mut progress: Option<ProgressBar>,
 ) -> Result<()> {
     let response = client
-        .get(&config.ws_url(&format!("/instance/{}/logs/stream", uuid)))
+        .get(config.ws_url(&format!("/instance/{uuid}/logs/stream")))
         .bearer_auth(config.token(client).await?)
         .upgrade()
         .send()
@@ -100,21 +100,21 @@ fn handle_log_message(message: InstanceLogMessage, progress: Option<&mut Progres
         InstanceLogType::State => match message.state.expect("State without state?") {
             VmInitState::Online => {
                 if let Some(pb) = progress {
-                    pb.set_prefix(format!("{}Instance is online", ROCKET));
+                    pb.set_prefix(format!("{ROCKET}Instance is online"));
                 } else {
                     eprintln!("Instance is online");
                 }
             }
             VmInitState::PullingContainerImage => {
                 if let Some(pb) = progress {
-                    pb.set_prefix(format!("{}Pulling container image", CRANE));
+                    pb.set_prefix(format!("{CRANE}Pulling container image"));
                 } else {
                     eprintln!("Pulling container image...");
                 }
             }
             VmInitState::ExecutingContainer => {
                 if let Some(pb) = progress {
-                    pb.set_prefix(format!("{}Executing container", CHECK));
+                    pb.set_prefix(format!("{CHECK}Executing container"));
                     pb.finish_and_clear();
                 } else {
                     eprintln!("Executing container...");

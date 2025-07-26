@@ -26,15 +26,14 @@ pub async fn stop_instance(
                 return;
             }
             spinner.set_message(format!(
-                "Attempting graceful shutdown... ({:.1}/{:.1} s)",
-                elapsed, total_time,
+                "Attempting graceful shutdown... ({elapsed:.1}/{total_time:.1} s)",
             ));
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
 
     let response = client
-        .delete(&config.url(&format!("/instance/{}", uuid)))
+        .delete(config.url(&format!("/instance/{uuid}")))
         .bearer_auth(config.token(client).await?)
         .json(&serde_json::json!({
             "timeout_ms": timeout_ms,
@@ -46,7 +45,7 @@ pub async fn stop_instance(
     let _ = progress_task.await;
 
     if response.status().is_success() {
-        println!("Successfully stopped instance with UUID: {}", uuid);
+        println!("Successfully stopped instance with UUID: {uuid}");
         Ok(())
     } else {
         error::handle_http_error(response, "stop instance").await

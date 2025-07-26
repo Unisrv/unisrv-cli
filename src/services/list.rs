@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{config::CliConfig, default_spinner, error};
 
-static SERVICE: Emoji = Emoji("🔧 ", "");
+static SERVICE: Emoji = Emoji("🔌 ", "");
 static LIST: Emoji = Emoji("📋 ", "");
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,10 +29,10 @@ pub async fn list_services(
 ) -> Result<()> {
     let progress = default_spinner();
     progress.set_prefix("Loading services");
-    progress.set_message(format!("{} Loading service list...", LIST));
+    progress.set_message(format!("{LIST} Loading service list..."));
 
     let response = client
-        .get(&config.url("/services"))
+        .get(config.url("/services"))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;
@@ -47,24 +47,20 @@ pub async fn list_services(
             return Ok(());
         }
 
-        let title_with_emoji = format!("{} Services", SERVICE);
-        
-        let headers = vec![
-            "ID".to_string(),
-            "NAME".to_string(),
-            "TYPE".to_string()
-        ];
-        
+        let title_with_emoji = format!("{SERVICE} Services");
+
+        let headers = vec!["ID".to_string(), "NAME".to_string(), "TYPE".to_string()];
+
         let mut content = Vec::new();
         for service in resp.services {
             let short_id = &service.id.to_string()[..8];
             content.push(vec![
                 short_id.to_string(),
                 service.name,
-                service.service_type
+                service.service_type,
             ]);
         }
-        
+
         crate::table::draw_table(title_with_emoji, headers, content);
     } else {
         error::handle_http_error(response, "list services").await?;
@@ -75,7 +71,7 @@ pub async fn list_services(
 
 pub async fn list(client: &Client, config: &mut CliConfig) -> Result<ServiceListResponse> {
     let response = client
-        .get(&config.url("/services"))
+        .get(config.url("/services"))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;

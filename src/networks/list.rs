@@ -44,10 +44,10 @@ pub async fn list_networks(
 ) -> Result<()> {
     let spinner = default_spinner();
     spinner.set_prefix("Fetching networks");
-    spinner.set_message(format!("{} Loading network list...", LIST));
+    spinner.set_message(format!("{LIST} Loading network list..."));
 
     let response = client
-        .get(&config.url("/networks?include_instance_count=true"))
+        .get(config.url("/networks?include_instance_count=true"))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;
@@ -71,28 +71,28 @@ pub async fn list_networks(
         return Ok(());
     }
 
-    let title_with_emoji = format!("{} User-defined Networks", NETWORK);
-    
+    let title_with_emoji = format!("{NETWORK} User-defined Networks");
+
     let headers = vec![
         "ID".to_string(),
         "NAME".to_string(),
         "CIDR".to_string(),
-        "INSTANCES".to_string()
+        "INSTANCES".to_string(),
     ];
-    
+
     let mut content = Vec::new();
     for network in network_list.networks {
         let short_id = &network.id.to_string()[..8];
         let instance_count = network.instance_count.unwrap_or(0);
-        
+
         content.push(vec![
             short_id.to_string(),
             network.name,
             network.ipv4_cidr,
-            instance_count.to_string()
+            instance_count.to_string(),
         ]);
     }
-    
+
     crate::table::draw_table(title_with_emoji, headers, content);
 
     Ok(())
@@ -100,7 +100,7 @@ pub async fn list_networks(
 
 pub async fn list(client: &Client, config: &mut CliConfig) -> Result<NetworkListResponse> {
     let response = client
-        .get(&config.url("/networks?include_instance_count=false"))
+        .get(config.url("/networks?include_instance_count=false"))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;

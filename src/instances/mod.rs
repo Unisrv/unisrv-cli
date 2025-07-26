@@ -50,6 +50,13 @@ pub fn command() -> Command {
                         .short('e')
                 )
                 .arg(
+                    Arg::new("network")
+                        .help("Join instance to network, format: [ip]@<network_id/name> (IP is optional - will auto-assign if omitted)")
+                        .long("network")
+                        .short('n')
+                        .value_name("[IP]@NETWORK")
+                )
+                .arg(
                     Arg::new("args")
                         .help("Arguments to pass to the container")
                         .num_args(0..)
@@ -105,16 +112,20 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             let args = run_matches
                 .get_many::<String>("args")
                 .map(|v| v.cloned().collect());
+            let network = run_matches.get_one::<String>("network").cloned();
             run::run_instance(
                 &http_client,
                 config,
-                run_matches
-                    .get_one::<String>("container_image")
-                    .expect("Container image should be required"),
-                vcpu_count,
-                memory_mb as u32,
-                args,
-                env,
+                run::RunInstanceParams {
+                    container_image: run_matches
+                        .get_one::<String>("container_image")
+                        .expect("Container image should be required"),
+                    vcpu_count,
+                    memory_mb: memory_mb as u32,
+                    args,
+                    env,
+                    network,
+                },
             )
             .await
         }
@@ -207,16 +218,16 @@ fn parse_memory_mb(s: &str) -> Result<u16, String> {
     };
     let num: u32 = num_str
         .parse()
-        .map_err(|_| format!("Invalid number: {}", num_str))?;
+        .map_err(|_| format!("Invalid number: {num_str}"))?;
     let mb = match unit {
         'M' => num,
         'G' => num
             .checked_mul(1024)
             .ok_or("Memory must be between 128M and 128G")?,
-        _ => return Err(format!("Invalid memory unit: {}", unit)),
+        _ => return Err(format!("Invalid memory unit: {unit}")),
     };
-    if mb < 128 || mb > 131072 {
-        return Err(format!("Memory must be between 128M and 128G ({} MB)", mb));
+    if !(128..=131072).contains(&mb) {
+        return Err(format!("Memory must be between 128M and 128G ({mb} MB)"));
     }
     Ok(mb as u16)
 }

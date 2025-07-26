@@ -50,7 +50,7 @@ pub async fn add_target(
     progress.set_prefix("Adding target...");
 
     let response = client
-        .post(&config.url(&format!("/service/{}/target", resolved_service_id)))
+        .post(config.url(&format!("/service/{resolved_service_id}/target")))
         .bearer_auth(config.token(client).await?)
         .json(&target_request)
         .send()
@@ -98,9 +98,8 @@ pub async fn delete_target(
     progress.set_prefix("Deleting target...");
 
     let response = client
-        .delete(&config.url(&format!(
-            "/service/{}/target/{}",
-            resolved_service_id, target_uuid
+        .delete(config.url(&format!(
+            "/service/{resolved_service_id}/target/{target_uuid}"
         )))
         .bearer_auth(config.token(client).await?)
         .send()

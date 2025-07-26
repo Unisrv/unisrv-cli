@@ -4,7 +4,7 @@ use reqwest::Client;
 
 use crate::{config::CliConfig, default_spinner, error};
 
-static SERVICE: Emoji = Emoji("🔧 ", "");
+static SERVICE: Emoji = Emoji("🔌 ", "");
 static DELETE: Emoji = Emoji("🗑️ ", "");
 
 pub async fn delete_service(
@@ -24,7 +24,7 @@ pub async fn delete_service(
     progress.set_prefix("Deleting service...");
 
     let response = client
-        .delete(&config.url(&format!("/service/{}", resolved_id)))
+        .delete(config.url(&format!("/service/{resolved_id}")))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;
@@ -33,7 +33,7 @@ pub async fn delete_service(
 
     if response.status().is_success() {
         println!(
-            "{} {} Service {} deleted successfully",
+            "{}{}Service {} deleted successfully",
             DELETE,
             SERVICE,
             console::style(&resolved_id.to_string()[..8]).yellow()

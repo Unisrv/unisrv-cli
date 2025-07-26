@@ -1,12 +1,13 @@
 use crate::config::CliConfig;
 use anyhow::Result;
+use cidr::Ipv4Cidr;
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
 
 mod create;
 mod delete;
-mod list;
+pub mod list;
 mod show;
 
 pub fn command() -> Command {
@@ -80,7 +81,7 @@ pub async fn handle(config: &mut CliConfig, network_matches: &clap::ArgMatches) 
     }
 }
 
-pub async fn resolve_network_id(input: &str, list: list::NetworkListResponse) -> Result<Uuid> {
+pub async fn resolve_network_id(input: &str, list: &list::NetworkListResponse) -> Result<Uuid> {
     // First try to parse as UUID
     if let Ok(parsed_uuid) = Uuid::parse_str(input) {
         return Ok(parsed_uuid);
@@ -122,4 +123,19 @@ pub async fn resolve_network_id(input: &str, list: list::NetworkListResponse) ->
         input,
         input
     ))
+}
+
+pub async fn next_ip(network_cidr: Ipv4Cidr, used_ips: &[String]) -> Result<String> {
+    network_cidr
+        .iter()
+        .addresses()
+        .find(|ip| {
+            *ip != network_cidr.first().address() && // Skip network address
+            *ip != network_cidr.last().address() && // Skip broadcast address
+            !used_ips.contains(&ip.to_string()) // Skip already used IPs
+        })
+        .ok_or(anyhow::anyhow!(
+            "No available IP addresses in CIDR {network_cidr}"
+        ))
+        .map(|ip| ip.to_string())
 }

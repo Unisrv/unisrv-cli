@@ -20,17 +20,17 @@ pub async fn show_network(
 
     let progress = default_spinner();
     progress.set_prefix("Resolving network");
-    progress.set_message(format!("🔍 Looking up network '{}'", network_input));
+    progress.set_message(format!("🔍 Looking up network '{network_input}'"));
 
     // Resolve network ID (could be UUID or name)
     let resolved_id =
-        resolve_network_id(network_input, super::list::list(client, config).await?).await?;
+        resolve_network_id(network_input, &super::list::list(client, config).await?).await?;
 
     progress.set_prefix("Loading network info");
-    progress.set_message(format!("{} Loading network details...", INFO));
+    progress.set_message(format!("{INFO} Loading network details..."));
 
     let response = client
-        .get(&config.url(&format!("/network/{}", resolved_id)))
+        .get(config.url(&format!("/network/{resolved_id}")))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;

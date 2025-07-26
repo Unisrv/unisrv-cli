@@ -81,7 +81,7 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
             width = col_widths[i]
         ));
     }
-    println!("{}", header_line);
+    println!("{header_line}");
 
     // Draw separator line under headers
     println!("{}", "-".repeat(column_separator_length));
@@ -111,7 +111,7 @@ pub fn draw_table(table_header: String, headers: Vec<String>, content: Vec<Vec<S
             let colored_cell = COLORS[i % COLORS.len()](&display_cell);
             row_line.push_str(&format!("{:<width$}", colored_cell, width = col_widths[i]));
         }
-        println!("{}", row_line);
+        println!("{row_line}");
     }
 }
 

@@ -41,10 +41,10 @@ pub async fn create_network(
 
     let spinner = default_spinner();
     spinner.set_prefix("Creating network");
-    spinner.set_message(format!("{} Creating network '{}'", NETWORK, name));
+    spinner.set_message(format!("{NETWORK} Creating network '{name}'"));
 
     let response = client
-        .post(&config.url("/network"))
+        .post(config.url("/network"))
         .bearer_auth(config.token(client).await?)
         .json(&request)
         .send()
@@ -57,7 +57,7 @@ pub async fn create_network(
             println!(
                 "{} {} created successfully with CIDR {}",
                 SUCCESS,
-                console::style(format!("Network '{}'", name)).bold().green(),
+                console::style(format!("Network '{name}'")).bold().green(),
                 console::style(cidr).cyan()
             );
             Ok(())

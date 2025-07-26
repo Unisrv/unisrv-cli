@@ -16,17 +16,17 @@ pub async fn delete_network(
 
     let spinner = default_spinner();
     spinner.set_prefix("Resolving network");
-    spinner.set_message(format!("{} Looking up network '{}'", SEARCH, network_input));
+    spinner.set_message(format!("{SEARCH} Looking up network '{network_input}'"));
 
     // Get network list to resolve the ID
     let network_list = super::list::list(client, config).await?;
-    let network_id = resolve_network_id(network_input, network_list).await?;
+    let network_id = resolve_network_id(network_input, &network_list).await?;
 
     spinner.set_prefix("Deleting network");
-    spinner.set_message(format!("{} Deleting network {}", TRASH, network_id));
+    spinner.set_message(format!("{TRASH} Deleting network {network_id}"));
 
     let response = client
-        .delete(&config.url(&format!("/network/{}", network_id)))
+        .delete(config.url(&format!("/network/{network_id}")))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;
@@ -38,7 +38,7 @@ pub async fn delete_network(
             println!(
                 "{} {} deleted successfully",
                 SUCCESS,
-                console::style(format!("Network {}", network_id))
+                console::style(format!("Network {network_id}"))
                     .bold()
                     .green()
             );

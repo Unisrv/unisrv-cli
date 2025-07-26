@@ -9,7 +9,8 @@ use crate::config::CliConfig;
 #[serde(tag = "type")]
 pub enum ServiceConfiguration {
     #[serde(alias = "tcp")]
-    TCP,
+    #[serde(alias = "TCP")]
+    Tcp,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -39,7 +40,7 @@ pub async fn new_service(
     config: &mut CliConfig,
 ) -> Result<ServiceProvisionResponse> {
     let response = client
-        .post(&config.url("/service"))
+        .post(config.url("/service"))
         .bearer_auth(config.token(client).await?)
         .json(&request)
         .send()
@@ -49,10 +50,10 @@ pub async fn new_service(
         let resp: ServiceProvisionResponse = response.json().await?;
         Ok(resp)
     } else {
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "Failed to create service: {} - {}",
             response.status(),
             response.text().await?
-        ));
+        ))
     }
 }

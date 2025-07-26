@@ -62,7 +62,7 @@ impl AuthSession {
         }
 
         let response = client
-            .post(&format!("{}/auth/refresh", DEFAULT_API_HOST))
+            .post(format!("{DEFAULT_API_HOST}/auth/refresh"))
             .json(&serde_json::json!({
                 "id": self.refresh_session_id,
                 "token": self.refresh_token,
@@ -82,8 +82,7 @@ impl AuthSession {
                         "{}{}",
                         NO_ENTRY,
                         console::style(format!(
-                            "Failed to refresh tokens: {}. Please login again.",
-                            reason
+                            "Failed to refresh tokens: {reason}. Please login again."
                         ))
                         .red()
                     ));
@@ -136,7 +135,7 @@ impl CliConfig {
             api_host = api_host.trim_start_matches("https://").to_string();
             use_https = true;
         }
-        log::debug!("Using API host: {}", api_host);
+        log::debug!("Using API host: {api_host}");
 
         CliConfig {
             api_host,
@@ -157,7 +156,7 @@ impl CliConfig {
 
     pub fn ensure_auth(&self) -> Result<(), anyhow::Error> {
         let program = std::env::args().nth(0).unwrap_or("<program>".to_string());
-        let login_command = console::style(format!("{} login", program)).bold();
+        let login_command = console::style(format!("{program} login")).bold();
 
         if let Some(auth_session) = &self.auth_session {
             if auth_session.expired() {
@@ -195,7 +194,7 @@ impl CliConfig {
         self.ensure_auth()?;
         let auth_session = self.auth_session.as_mut().unwrap();
         auth_session.refresh(client).await?;
-        return Ok(auth_session.access_token.clone());
+        Ok(auth_session.access_token.clone())
     }
 
     pub fn auth_session(&self) -> Option<&AuthSession> {

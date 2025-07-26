@@ -48,7 +48,7 @@ async fn main() -> Result<(), Error> {
     };
 
     if let Err(e) = r {
-        log::debug!("Error: {:?}", e);
+        log::debug!("Error: {e:?}");
         eprintln!("{} {}", console::style("error:").red().bold(), e);
         std::process::exit(1);
     }

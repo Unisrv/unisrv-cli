@@ -56,7 +56,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
         }
     };
     let response: reqwest::Response = http_client
-        .post(&config.url("/auth/login/basic"))
+        .post(config.url("/auth/login/basic"))
         .basic_auth(username, Some(password))
         .send()
         .await?;

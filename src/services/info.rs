@@ -57,7 +57,7 @@ pub async fn get_service_info(
     progress.set_prefix("Loading service info...");
 
     let response = client
-        .get(&config.url(&format!("/service/{}", resolved_id)))
+        .get(config.url(&format!("/service/{resolved_id}")))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;

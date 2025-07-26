@@ -39,13 +39,13 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
 
             if *args.get_one::<bool>("json").unwrap_or(&false) {
                 let json_token = JsonToken {
-                    token: token,
+                    token,
                     expires_at: config.auth_session().unwrap().access_token_expiry,
                 };
                 println!("{}", serde_json::to_string(&json_token)?);
                 return Ok(());
             }
-            println!("{}", token);
+            println!("{token}");
         }
         _ => {
             unimplemented!("Unknown auth command");
