@@ -2,6 +2,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod auth;
 pub mod config;
+pub mod decl;
 pub mod error;
 pub mod instances;
 pub mod login;
