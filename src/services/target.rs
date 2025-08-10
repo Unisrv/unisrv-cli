@@ -40,7 +40,7 @@ pub async fn add_target(
 
     // Parse target (instance_id:port)
     let (instance_id, port) =
-        super::parse_target(target, instances::list::list(client, config).await?).await?;
+        super::parse_target(target, &instances::list::list(client, config).await?).await?;
 
     let target_request = ServiceInstanceTarget {
         instance_id,

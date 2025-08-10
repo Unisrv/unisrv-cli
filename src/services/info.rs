@@ -119,12 +119,16 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     if !service.targets.is_empty() {
         let targets_header = format!("{} Targets ({})", TARGET, service.targets.len());
-        let headers = vec!["ID".to_string(), "INSTANCE ID".to_string(), "PORT".to_string()];
+        let headers = vec![
+            "ID".to_string(),
+            "INSTANCE ID".to_string(),
+            "PORT".to_string(),
+        ];
 
         let mut content = Vec::new();
         for target in &service.targets {
             content.push(vec![
-                target.id.to_string(), 
+                target.id.to_string(),
                 target.instance_id.to_string(),
                 target.instance_port.to_string(),
             ]);

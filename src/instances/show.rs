@@ -52,13 +52,15 @@ pub async fn show_instance(
     progress.set_message(format!("🔍 Looking up instance '{instance_input}'"));
 
     // Resolve instance ID (could be UUID, name, or prefix)
-    let resolved_id = resolve_uuid(instance_input, list::list(client, config).await?).await?;
+    let resolved_id = resolve_uuid(instance_input, &list::list(client, config).await?).await?;
 
     progress.set_prefix("Loading instance info");
     progress.set_message(format!("{INFO} Loading instance details..."));
 
     let response = client
-        .get(config.url(&format!("/instance/{resolved_id}?include_service_targets=true")))
+        .get(config.url(&format!(
+            "/instance/{resolved_id}?include_service_targets=true"
+        )))
         .bearer_auth(config.token(client).await?)
         .send()
         .await?;
@@ -77,7 +79,7 @@ pub async fn show_instance(
 
 fn display_instance_info(instance: &InstanceDetailResponse) {
     let header = format!("{} Instance {}", INSTANCE, instance.id);
-    
+
     let container_image = instance
         .configuration
         .get("container_image")
@@ -88,9 +90,9 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
     let mut fields = vec![
         (
             "Name".to_string(),
-            console::style(
-                instance.name.as_deref().unwrap_or("<unnamed>").to_string()
-            ).bold().green(),
+            console::style(instance.name.as_deref().unwrap_or("<unnamed>").to_string())
+                .bold()
+                .green(),
         ),
         (
             "ID".to_string(),
@@ -100,10 +102,7 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
             "State".to_string(),
             console::style(instance.state.clone()).cyan(),
         ),
-        (
-            "Image".to_string(),
-            console::style(container_image).cyan(),
-        ),
+        ("Image".to_string(), console::style(container_image).cyan()),
         (
             "Node ID".to_string(),
             console::style(instance.node_id.to_string()).dim(),
@@ -149,11 +148,7 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
     // Display service targets if any
     if let Some(ref service_targets) = instance.service_targets {
         if !service_targets.is_empty() {
-            let targets_header = format!(
-                "{} Service Targets ({})",
-                SERVICE,
-                service_targets.len()
-            );
+            let targets_header = format!("{} Service Targets ({})", SERVICE, service_targets.len());
             let headers = vec![
                 "SERVICE NAME".to_string(),
                 "SERVICE ID".to_string(),

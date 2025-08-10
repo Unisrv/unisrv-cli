@@ -3,7 +3,7 @@ use crate::{
     instances::{self, list::InstanceListResponse, resolve_uuid},
     services::new::ServiceInstanceTarget,
 };
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
@@ -105,8 +105,25 @@ pub fn command() -> Command {
                                 .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
                                 .required(true) //for now.
                                 .action(clap::ArgAction::Append)
-                        ),
-                ),
+                        )
+                )
+                .subcommand(
+                    Command::new("http")
+                        .about("Creates a new HTTP service")
+                        .arg(
+                            Arg::new("host")
+                                .help("Domain host of the HTTP service, e.g. app.example.com")
+                                .required(true)
+                                .index(1),
+                        )
+                        .arg(
+                            Arg::new("target")
+                                .short('t')
+                                .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
+                                .required(true)
+                                .action(clap::ArgAction::Append)
+                        )
+                )
         )
 }
 
@@ -134,19 +151,9 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
                         .cloned()
                         .collect();
 
-                    let mut parsed_targets: Vec<ServiceInstanceTarget> =
-                        Vec::with_capacity(targets.len());
-                    for target in targets {
-                        let (id, port) = parse_target(
-                            &target,
-                            instances::list::list(&http_client, config).await?,
-                        )
-                        .await?;
-                        parsed_targets.push(ServiceInstanceTarget {
-                            instance_id: id,
-                            instance_port: port,
-                        });
-                    }
+                    let parsed_targets =
+                        parse_targets(&targets, instances::list::list(&http_client, config).await?)
+                            .await?;
 
                     let request = new::ServiceProvisionRequest {
                         region: "dev".to_string(),
@@ -158,6 +165,35 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
                     println!(
                         "Service created with ID: {}\nConnection String: {}",
                         response.service_id, response.connection_string
+                    );
+                }
+                Some(("http", args)) => {
+                    let host = args.get_one::<String>("host").unwrap();
+                    let (host, subdomain) = as_domain(host)
+                        .map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
+
+                    let targets: Vec<String> = args
+                        .get_many::<String>("target")
+                        .unwrap()
+                        .cloned()
+                        .collect();
+
+                    let parsed_targets =
+                        parse_targets(&targets, instances::list::list(&http_client, config).await?)
+                            .await?;
+
+                    let request = new::ServiceProvisionRequest {
+                        region: "dev".to_string(),
+                        name: subdomain.to_string(),
+                        configuration: new::ServiceConfiguration::Http {
+                            host: host.to_string(),
+                        },
+                        instance_targets: parsed_targets,
+                    };
+                    let response = new::new_service(request, &http_client, config).await?;
+                    println!(
+                        "Service created with ID: {} \nHost: https://{host}",
+                        response.service_id
                     );
                 }
                 _ => {
@@ -177,7 +213,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
     }
 }
 
-async fn parse_target(target: &str, list: InstanceListResponse) -> Result<(Uuid, u16)> {
+async fn parse_target(target: &str, list: &InstanceListResponse) -> Result<(Uuid, u16)> {
     let parts: Vec<&str> = target.split(':').collect();
     if parts.len() != 2 {
         return Err(anyhow::anyhow!(
@@ -194,7 +230,7 @@ async fn parse_target(target: &str, list: InstanceListResponse) -> Result<(Uuid,
 
 pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) -> Result<Uuid> {
     // First try to parse as UUID
-    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
+    if let Some(parsed_uuid) = Uuid::parse_str(input).ok() {
         return Ok(parsed_uuid);
     }
 
@@ -234,4 +270,33 @@ pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) ->
         input,
         input
     ))
+}
+
+async fn parse_targets(
+    targets: &[String],
+    list: InstanceListResponse,
+) -> Result<Vec<ServiceInstanceTarget>> {
+    let mut parsed_targets: Vec<ServiceInstanceTarget> = Vec::with_capacity(targets.len());
+    for target in targets {
+        let (id, port) = parse_target(&target, &list).await?;
+        parsed_targets.push(ServiceInstanceTarget {
+            instance_id: id,
+            instance_port: port,
+        });
+    }
+    Ok(parsed_targets)
+}
+
+fn as_domain(host: &str) -> Result<(String, String)> {
+    if host.ends_with(".unisrv.dev") {
+        let subdomain = host.trim_end_matches(".unisrv.dev");
+        return Ok((host.to_owned(), subdomain.to_string()));
+    }
+    if host.contains('.') || host.chars().any(|c| !c.is_alphabetic() || !c.is_numeric()) {
+        return Err(anyhow::anyhow!(
+            "Invalid host format. Expected single subdomain which will be used as <subdomain>.unisrv.dev"
+        ));
+    }
+
+    Ok((format!("{}.unisrv.dev", host), host.to_string()))
 }

@@ -109,7 +109,8 @@ pub async fn run_instance(
 
     let progress = default_spinner();
     progress.set_message(format!(
-        "{ROCKET} Starting instance with image: {}", params.container_image
+        "{ROCKET} Starting instance with image: {}",
+        params.container_image
     ));
 
     let response = client
@@ -126,6 +127,11 @@ pub async fn run_instance(
 
     if response.status().is_success() {
         let id = response.json::<InstanceResponse>().await?.id;
+        progress.println(format!(
+            "{} Instance {} started successfully",
+            ROCKET,
+            id.to_string().get(0..8).unwrap_or(&id.to_string())
+        ));
         logs::stream_logs(client, config, id, Some(progress)).await?;
     } else {
         return error::handle_http_error(response, "start instance").await;

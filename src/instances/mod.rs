@@ -155,7 +155,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             let uuid = rm_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required?");
-            let uuid = resolve_uuid(uuid, list::list(&http_client, config).await?).await?;
+            let uuid = resolve_uuid(uuid, &list::list(&http_client, config).await?).await?;
             let timeout_ms = rm_matches
                 .get_one::<u32>("timeout")
                 .cloned()
@@ -182,7 +182,7 @@ pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches)
             let uuid = logs_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required");
-            let uuid = resolve_uuid(uuid, list::list(&http_client, config).await?).await?;
+            let uuid = resolve_uuid(uuid, &list::list(&http_client, config).await?).await?;
             logs::stream_logs(&http_client, config, uuid, None).await
         }
         Some((_, _)) => Err(anyhow::anyhow!("Unknown instance command")),
@@ -257,7 +257,7 @@ fn parse_memory_mb(s: &str) -> Result<u16, String> {
     Ok(mb as u16)
 }
 
-pub async fn resolve_uuid(input: &str, list: list::InstanceListResponse) -> Result<Uuid> {
+pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
     // First try to parse as UUID
     if let Ok(parsed_uuid) = Uuid::parse_str(input) {
         return Ok(parsed_uuid);
