@@ -120,7 +120,7 @@ pub struct CliConfig {
 const DEFAULT_API_HOST: &str = if cfg!(debug_assertions) {
     "http://localhost:8080"
 } else {
-    "http://api.unisrv.io"
+    "https://api.unisrv.io"
 };
 
 impl CliConfig {

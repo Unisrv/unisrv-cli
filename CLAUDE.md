@@ -76,7 +76,7 @@ cli
 
 ### API Integration
 
-- **Base URL**: Defaults to `http://localhost:8080` in debug builds, `http://api.unisrv.io` in release
+- **Base URL**: Defaults to `http://localhost:8080` in debug builds, `https://api.unisrv.io` in release
 - **Authentication**: Bearer token authentication with automatic token refresh
 - **WebSocket**: Real-time log streaming for instances
 
