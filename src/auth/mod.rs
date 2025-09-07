@@ -31,8 +31,7 @@ struct JsonToken {
     expires_at: DateTime<chrono::Utc>,
 }
 
-pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches) -> Result<()> {
-    let http_client = Client::new();
+pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_matches: &clap::ArgMatches) -> Result<()> {
     match instance_matches.subcommand() {
         Some(("token", args)) => {
             let token = config.token(&http_client).await?;

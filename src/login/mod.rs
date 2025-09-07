@@ -41,8 +41,7 @@ pub fn command() -> Command {
         )
 }
 
-pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches) -> Result<()> {
-    let http_client = Client::new();
+pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_matches: &clap::ArgMatches) -> Result<()> {
 
     let username = instance_matches
         .get_one::<String>("username")

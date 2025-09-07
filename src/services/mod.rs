@@ -127,8 +127,7 @@ pub fn command() -> Command {
         )
 }
 
-pub async fn handle(config: &mut CliConfig, instance_matches: &clap::ArgMatches) -> Result<()> {
-    let http_client = Client::new();
+pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_matches: &clap::ArgMatches) -> Result<()> {
     match instance_matches.subcommand() {
         Some(("list", args)) => list::list_services(&http_client, config, args).await,
         Some(("show", args)) => info::get_service_info(&http_client, config, args).await,

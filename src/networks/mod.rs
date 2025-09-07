@@ -58,8 +58,7 @@ pub fn command() -> Command {
         .subcommand(Command::new("list").alias("ls").about("List all networks"))
 }
 
-pub async fn handle(config: &mut CliConfig, network_matches: &clap::ArgMatches) -> Result<()> {
-    let http_client = Client::new();
+pub async fn handle(config: &mut CliConfig, http_client: &Client, network_matches: &clap::ArgMatches) -> Result<()> {
     match network_matches.subcommand() {
         Some(("new", args)) => create::create_network(&http_client, config, args).await,
         Some(("show", args)) | Some(("get", args)) => {

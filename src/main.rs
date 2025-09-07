@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Command;
-use reqwest::Error;
+use reqwest::{Client, Error};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -19,23 +19,24 @@ async fn main() -> Result<(), Error> {
         .subcommand(unisrv::auth::command())
         .get_matches();
     let mut config = unisrv::config::CliConfig::init();
+    let http_client = Client::new();
 
     // Match on the subcommands and handle logic
     let r = match matches.subcommand() {
         Some(("instance", instance_matches)) => {
-            unisrv::instances::handle(&mut config, instance_matches).await
+            unisrv::instances::handle(&mut config, &http_client, instance_matches).await
         }
         Some(("network", network_matches)) => {
-            unisrv::networks::handle(&mut config, network_matches).await
+            unisrv::networks::handle(&mut config, &http_client, network_matches).await
         }
         Some(("service", service_matches)) => {
-            unisrv::services::handle(&mut config, service_matches).await
+            unisrv::services::handle(&mut config, &http_client, service_matches).await
         }
         Some(("login", instance_matches)) => {
-            unisrv::login::handle(&mut config, instance_matches).await
+            unisrv::login::handle(&mut config, &http_client, instance_matches).await
         }
         Some(("auth", instance_matches)) => {
-            unisrv::auth::handle(&mut config, instance_matches).await
+            unisrv::auth::handle(&mut config, &http_client, instance_matches).await
         }
         _ => {
             eprintln!("Unknown command");
