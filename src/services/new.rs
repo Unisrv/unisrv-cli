@@ -57,7 +57,6 @@ pub struct ServiceProvisionRequest {
 #[derive(Deserialize, Debug)]
 pub struct ServiceProvisionResponse {
     pub service_id: Uuid,
-    pub connection_string: String,
 }
 
 pub async fn new_service(
