@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::login::LoginResponse;
 use anyhow::Result;
 use chrono::DateTime;
@@ -14,6 +16,15 @@ pub struct AuthSession {
     refresh_session_id: uuid::Uuid,
     refresh_token: String,
     pub refresh_token_expiry: DateTime<chrono::Utc>,
+    pub container_registry_auth: Option<BTreeMap<String, RegistryToken>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegistryToken {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub token: Option<String>,
+    pub token_expiry: Option<DateTime<chrono::Utc>>,
 }
 
 impl AuthSession {
@@ -184,9 +195,46 @@ impl CliConfig {
             refresh_session_id: response.refresh_session_id,
             refresh_token: response.refresh_token,
             refresh_token_expiry: response.refresh_expires_at,
+            container_registry_auth: None,
         };
         auth_session.save()?;
         self.auth_session = Some(auth_session);
+        Ok(())
+    }
+
+    /// Save container registry authentication
+    pub fn save_registry_auth(
+        &mut self,
+        registry: &str,
+        username: Option<String>,
+        password: Option<String>,
+        token: Option<String>,
+        token_expiry: Option<DateTime<chrono::Utc>>,
+    ) -> Result<()> {
+        let auth_session = self
+            .auth_session
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No authentication session found"))?;
+
+        let registry_token = RegistryToken {
+            username,
+            password,
+            token,
+            token_expiry,
+        };
+
+        if auth_session.container_registry_auth.is_none() {
+            auth_session.container_registry_auth = Some(BTreeMap::new());
+        }
+
+        auth_session
+            .container_registry_auth
+            .as_mut()
+            .unwrap()
+            .insert(registry.to_string(), registry_token);
+
+        auth_session.save()?;
+        log::debug!("Saved registry auth for {}", registry);
         Ok(())
     }
 

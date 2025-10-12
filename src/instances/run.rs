@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
-use crate::{config::CliConfig, default_spinner, error, instances::logs, networks};
+use crate::{config::CliConfig, default_spinner, error, instances::logs, networks, registry};
 use anyhow::Result;
 use cidr::Ipv4Cidr;
 use console::Emoji;
+use oci_spec::distribution::Reference;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -26,6 +28,38 @@ pub async fn run_instance(
     config: &mut CliConfig,
     params: RunInstanceParams<'_>,
 ) -> Result<()> {
+    // Step 1: Parse container image as Reference
+    let reference = Reference::from_str(params.container_image)
+        .map_err(|e| anyhow::anyhow!("Invalid container image reference '{}': {}", params.container_image, e))?;
+
+    log::debug!("Parsed image reference: registry={}, repository={}, tag={}",
+        reference.resolve_registry(),
+        reference.repository(),
+        reference.tag().unwrap_or("latest")
+    );
+
+    // Step 2: Authenticate and verify image
+    let spinner = default_spinner();
+    spinner.set_message("Verifying container image...");
+
+    // Get token (checks credentials, handles Docker Hub anonymous fallback)
+    let token = registry::client::get_token(&reference, config)
+        .await
+        .map_err(|e| {
+            spinner.finish_and_clear();
+            e
+        })?;
+
+    // Verify manifest exists
+    registry::client::get_manifest_and_config(&reference, token.as_deref())
+        .await
+        .map_err(|e| {
+            spinner.finish_and_clear();
+            anyhow::anyhow!("Failed to verify container image: {}", e)
+        })?;
+
+    let scoped_token = token;
+
     // Parse and resolve network configuration if provided
     let network_config = if let Some(network_str) = params.network {
         let parts: Vec<&str> = network_str.splitn(2, '@').collect();
@@ -100,6 +134,7 @@ pub async fn run_instance(
             "args": params.args,
             "env": params.env,
         },
+        "container_registry_token": scoped_token,
     });
 
     // Add network configuration if provided

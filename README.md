@@ -8,7 +8,8 @@ A nice wrapper around the [Unisrv REST API](https://api.unisrv.io/swagger-ui/).
 - **Instance Management**: Create, stop, list, and monitor VM instances with container images
 - **Service Management**: Manage HTTP services with load balancing, path-based routing, and target configuration
 - **Network Management**: Create and manage private networks for instance-to-instance communication
-- **Secure Authentication**: Authenticatoin token management with automatic refresh, stored in system keyring
+- **Registry Authentication**: Login to private container registries (Docker Hub, GHCR, etc.) with automatic token management
+- **Secure Authentication**: Authentication token management with automatic refresh, stored in system keyring
 - **UUID Resolution**: Accept full UUIDs, UUID prefixes, or names for resource identification
 - **Real-time Monitoring**: Stream logs from running instances via WebSocket
 - **User-friendly Experience**: Progress spinners, colored output, and helpful error messages
@@ -37,6 +38,9 @@ cli
 │   ├── show (get) - Get network details
 │   ├── delete (rm) - Delete network
 │   └── list (ls) - List networks
+├── registry (reg) - Manage container registry authentication
+│   ├── login - Login to a container registry
+│   └── list (ls) - List configured registries
 ├── login - Authenticate with username/password
 └── auth - Authentication utilities
     └── token - Get current auth token
@@ -73,12 +77,31 @@ cargo clippy
 
 ## Authentication
 
+### Platform Authentication
+
 Authentication sessions are stored in the platform's keyring storage for security.
 To log in, use the following command:
 
 ```bash
 unisrv login --username <username>
 ```
+
+### Container Registry Authentication
+
+To use private container images, authenticate with the container registry:
+
+```bash
+# Login to a registry (password will be prompted securely)
+unisrv registry login ghcr.io --username <username>
+
+# Or pipe password from stdin (recommended for scripts)
+echo $GITHUB_TOKEN | unisrv registry login ghcr.io --username <username> --password-stdin
+
+# List configured registries
+unisrv registry list
+```
+
+**Note**: Docker Hub public images work without authentication. Private registries require authentication before running instances.
 
 ## Configuration
 

@@ -15,6 +15,7 @@ async fn main() -> Result<(), Error> {
         .subcommand(unisrv::instances::command())
         .subcommand(unisrv::networks::command())
         .subcommand(unisrv::services::command())
+        .subcommand(unisrv::registry::command())
         .subcommand(unisrv::login::command())
         .subcommand(unisrv::auth::command())
         .get_matches();
@@ -31,6 +32,9 @@ async fn main() -> Result<(), Error> {
         }
         Some(("service", service_matches)) => {
             unisrv::services::handle(&mut config, &http_client, service_matches).await
+        }
+        Some(("registry", registry_matches)) => {
+            unisrv::registry::handle(&mut config, &http_client, registry_matches).await
         }
         Some(("login", instance_matches)) => {
             unisrv::login::handle(&mut config, &http_client, instance_matches).await

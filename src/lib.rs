@@ -6,6 +6,7 @@ pub mod error;
 pub mod instances;
 pub mod login;
 pub mod networks;
+pub mod registry;
 pub mod services;
 pub mod table;
 
