@@ -1,6 +1,7 @@
 # Unisrv CLI
 
-A Rust-based command-line interface for provisioning and managing cloud resources. The CLI provides comprehensive functionality for managing instances (VMs), networks, and services through a REST API.
+A Rust-based command-line interface for provisioning and managing Unisrv resources.
+A nice wrapper around the [Unisrv REST API](https://api.unisrv.io/swagger-ui/).
 
 ## Features
 
