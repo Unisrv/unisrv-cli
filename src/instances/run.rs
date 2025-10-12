@@ -39,14 +39,14 @@ pub async fn run_instance(
     );
 
     // Step 2: Authenticate and verify image
-    let spinner = default_spinner();
-    spinner.set_message("Verifying container image...");
+    let progress = default_spinner();
+    progress.set_message("Verifying container image...");
 
     // Get token (checks credentials, handles Docker Hub anonymous fallback)
     let token = registry::client::get_token(&reference, config)
         .await
         .map_err(|e| {
-            spinner.finish_and_clear();
+            progress.finish_and_clear();
             e
         })?;
 
@@ -54,7 +54,7 @@ pub async fn run_instance(
     registry::client::get_manifest_and_config(&reference, token.as_deref())
         .await
         .map_err(|e| {
-            spinner.finish_and_clear();
+            progress.finish_and_clear();
             anyhow::anyhow!("Failed to verify container image: {}", e)
         })?;
 
@@ -142,7 +142,6 @@ pub async fn run_instance(
         payload["network"] = network_config;
     }
 
-    let progress = default_spinner();
     progress.set_message(format!(
         "{ROCKET} Starting instance with image: {}",
         params.container_image
