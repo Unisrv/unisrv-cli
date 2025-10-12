@@ -125,3 +125,31 @@ fn handle_log_message(message: InstanceLogMessage, progress: Option<&mut Progres
     };
     false
 }
+
+pub async fn get_logs(
+    client: &Client,
+    config: &mut CliConfig,
+    uuid: Uuid,
+) -> Result<()> {
+    let response = client
+        .get(config.url(&format!("/instance/{uuid}/logs")))
+        .bearer_auth(config.token(client).await?)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get logs: {} - {}",
+            response.status(),
+            response.text().await?
+        ));
+    }
+
+    let logs: Vec<InstanceLogMessage> = response.json().await?;
+
+    for log in logs {
+        handle_log_message(log, None);
+    }
+
+    Ok(())
+}

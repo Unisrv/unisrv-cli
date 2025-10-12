@@ -109,13 +109,20 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("logs")
-                .about("Stream logs for a specific instance")
+                .about("Get logs for a specific instance")
                 .alias("log")
                 .arg_required_else_help(true)
                 .arg(
                     Arg::new("uuid")
-                        .help("The UUID, name, or UUID prefix of the instance to stream logs for")
+                        .help("The UUID, name, or UUID prefix of the instance to get logs for")
                         .required(true),
+                )
+                .arg(
+                    Arg::new("tail")
+                        .help("Stream logs in real-time")
+                        .long("tail")
+                        .short('f')
+                        .action(clap::ArgAction::SetTrue),
                 )
             )
 }
@@ -181,8 +188,13 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
             let uuid = logs_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required");
-            let uuid = resolve_uuid(uuid, &list::list(&http_client, config).await?).await?;
-            logs::stream_logs(&http_client, config, uuid, None).await
+            let uuid = resolve_uuid_any_state(uuid, &list::list(&http_client, config).await?).await?;
+            let tail = logs_matches.get_one::<bool>("tail").unwrap_or(&false);
+            if *tail {
+                logs::stream_logs(&http_client, config, uuid, None).await
+            } else {
+                logs::get_logs(&http_client, config, uuid).await
+            }
         }
         Some((_, _)) => Err(anyhow::anyhow!("Unknown instance command")),
         None => {
@@ -257,14 +269,22 @@ fn parse_memory_mb(s: &str) -> Result<u16, String> {
 }
 
 pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
+    resolve_uuid_with_filter(input, list, true)
+}
+
+pub async fn resolve_uuid_any_state(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
+    resolve_uuid_with_filter(input, list, false)
+}
+
+fn resolve_uuid_with_filter(input: &str, list: &list::InstanceListResponse, running_only: bool) -> Result<Uuid> {
     // First try to parse as UUID
     if let Ok(parsed_uuid) = Uuid::parse_str(input) {
         return Ok(parsed_uuid);
     }
 
-    // Try to find by name (exact match) - only check running instances
+    // Try to find by name (exact match)
     for instance in &list.instances {
-        if instance.state == RUNNING_STATE {
+        if !running_only || instance.state == RUNNING_STATE {
             if let Some(ref name) = instance.name {
                 if name == input {
                     return Ok(instance.id);
@@ -279,7 +299,7 @@ pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Res
             .instances
             .iter()
             .filter(|instance| {
-                instance.state == RUNNING_STATE && instance.id.to_string().starts_with(input)
+                (!running_only || instance.state == RUNNING_STATE) && instance.id.to_string().starts_with(input)
             })
             .collect::<Vec<_>>();
 
@@ -287,7 +307,8 @@ pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Res
             return Ok(starts_with_input[0].id);
         } else if starts_with_input.is_empty() {
             return Err(anyhow::anyhow!(
-                "No running instance found with UUID starting with '{}'",
+                "No {} instance found with UUID starting with '{}'",
+                if running_only { "running" } else { "" },
                 input
             ));
         } else {
@@ -300,7 +321,8 @@ pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Res
     }
 
     Err(anyhow::anyhow!(
-        "No running instance found with name '{}' or UUID '{}'",
+        "No {} instance found with name '{}' or UUID '{}'",
+        if running_only { "running" } else { "" },
         input,
         input
     ))
