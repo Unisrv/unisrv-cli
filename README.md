@@ -5,7 +5,7 @@ A Rust-based command-line interface for provisioning and managing cloud resource
 ## Features
 
 - **Instance Management**: Create, stop, list, and monitor VM instances with container images
-- **Service Management**: Manage load balancer services with HTTP or raw TCP support and target configuration
+- **Service Management**: Manage HTTP services with load balancing, path-based routing, and target configuration
 - **Network Management**: Create and manage private networks for instance-to-instance communication
 - **Secure Authentication**: Authenticatoin token management with automatic refresh, stored in system keyring
 - **UUID Resolution**: Accept full UUIDs, UUID prefixes, or names for resource identification
@@ -21,15 +21,19 @@ cli
 │   ├── stop (rm) - Terminate instance
 │   ├── list (ls) - List instances
 │   └── logs (log) - Stream instance logs
-├── service (srv, services) - Manage load balancer services  
+├── service (srv, services) - Manage HTTP services with load balancing
 │   ├── list (ls) - List services
 │   ├── show (get) - Get service details
 │   ├── delete (rm) - Delete service
-│   ├── new tcp - Create TCP service
-│   └── target - Manage service targets
+│   ├── new - Create HTTP service
+│   ├── target - Manage service targets (add/delete instance targets)
+│   └── location (loc) - Manage service locations (routing rules)
+│       ├── list (ls) - List locations (default when no subcommand)
+│       ├── add - Add/update location routing rule
+│       └── delete (rm) - Delete location
 ├── network (net, networks) - Manage private networks
 │   ├── new - Create network with CIDR
-│   ├── show (get) - Get network details  
+│   ├── show (get) - Get network details
 │   ├── delete (rm) - Delete network
 │   └── list (ls) - List networks
 ├── login - Authenticate with username/password
@@ -81,4 +85,3 @@ unisrv login --username <username>
   - Debug builds default to `http://localhost:8080`
   - Release builds default to `https://api.unisrv.io`
 - **Logging**: Set `RUST_LOG=debug` for detailed debug output
-
