@@ -1,7 +1,6 @@
 use crate::{
     config::CliConfig,
-    instances::{self, list::InstanceListResponse, resolve_uuid},
-    services::new::ServiceInstanceTarget,
+    instances::{list::InstanceListResponse, resolve_uuid},
 };
 use anyhow::{Ok, Result};
 use clap::{Arg, Command};
@@ -11,6 +10,7 @@ use uuid::Uuid;
 mod delete;
 mod info;
 mod list;
+mod location;
 mod new;
 mod target;
 
@@ -63,9 +63,16 @@ pub fn command() -> Command {
                         )
                         .arg(
                             Arg::new("target")
-                                .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
+                                .help("Instance UUID and internal port, e.g. uuid:8080")
                                 .required(true)
                                 .index(2),
+                        )
+                        .arg(
+                            Arg::new("group")
+                                .long("group")
+                                .short('g')
+                                .help("Optional target group name")
+                                .required(false),
                         ),
                 )
                 .subcommand(
@@ -88,42 +95,82 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("new")
-                .about("Creates a new service")
+                .about("Creates a new HTTP service")
+                .arg(
+                    Arg::new("name")
+                        .help("Name of the service")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("host")
+                        .help("Domain host of the HTTP service, e.g. app.example.com or subdomain (will be <subdomain>.unisrv.dev)")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("allow_http")
+                        .long("allow-http")
+                        .help("Allow HTTP connections (default is HTTPS only)")
+                        .action(clap::ArgAction::SetTrue)
+                )
+        )
+        .subcommand(
+            Command::new("location")
+                .alias("loc")
+                .about("Manage service locations")
                 .subcommand_required(true)
                 .subcommand(
-                    Command::new("tcp")
-                        .about("Creates a new TCP service")
+                    Command::new("add")
+                        .about("Add a location to a service")
                         .arg(
-                            Arg::new("name")
-                                .help("Name of the service")
+                            Arg::new("service_id")
+                                .help("Service UUID or name")
                                 .required(true)
                                 .index(1),
                         )
                         .arg(
-                            Arg::new("target")
-                                .short('t')
-                                .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
-                                .required(true) //for now.
-                                .action(clap::ArgAction::Append)
+                            Arg::new("path")
+                                .help("Path for the location, e.g. /api")
+                                .required(true)
+                                .index(2),
                         )
+                        .arg(
+                            Arg::new("target_type")
+                                .help("Target type: 'service', 'srv', or 'url'")
+                                .required(true)
+                                .index(3),
+                        )
+                        .arg(
+                            Arg::new("target_value")
+                                .help("Target value: group name for service, or URL for url type")
+                                .required(false)
+                                .index(4),
+                        )
+                        .arg(
+                            Arg::new("override_404")
+                                .long("override-404")
+                                .help("Custom 404 override path")
+                                .required(false),
+                        ),
                 )
                 .subcommand(
-                    Command::new("http")
-                        .about("Creates a new HTTP service")
+                    Command::new("delete")
+                        .alias("rm")
+                        .about("Delete a location from a service")
                         .arg(
-                            Arg::new("host")
-                                .help("Domain host of the HTTP service, e.g. app.example.com")
+                            Arg::new("service_id")
+                                .help("Service UUID or name")
                                 .required(true)
                                 .index(1),
                         )
                         .arg(
-                            Arg::new("target")
-                                .short('t')
-                                .help("Instance UUID and internal port, e.g. 123e4567-e89b-12d3-a456-426614174000:8080")
+                            Arg::new("path")
+                                .help("Path of the location to delete")
                                 .required(true)
-                                .action(clap::ArgAction::Append)
-                        )
-                )
+                                .index(2),
+                        ),
+                ),
         )
 }
 
@@ -140,65 +187,54 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
                 Ok(())
             }
         },
-        Some(("new", now_matches)) => {
-            match now_matches.subcommand() {
-                Some(("tcp", args)) => {
-                    let name = args.get_one::<String>("name").unwrap();
-                    let targets: Vec<String> = args
-                        .get_many::<String>("target")
-                        .unwrap()
-                        .cloned()
-                        .collect();
-
-                    let parsed_targets =
-                        parse_targets(&targets, instances::list::list(&http_client, config).await?)
-                            .await?;
-
-                    let request = new::ServiceProvisionRequest {
-                        region: "dev".to_string(),
-                        name: name.to_string(),
-                        configuration: new::ServiceConfiguration::Tcp,
-                        instance_targets: parsed_targets,
-                    };
-                    let response = new::new_service(request, &http_client, config).await?;
-                    println!(
-                        "Service created with ID: {}\nConnection String: {}",
-                        response.service_id, response.connection_string
-                    );
-                }
-                Some(("http", args)) => {
-                    let host = args.get_one::<String>("host").unwrap();
-                    let (host, subdomain) = as_domain(host)
-                        .map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
-
-                    let targets: Vec<String> = args
-                        .get_many::<String>("target")
-                        .unwrap()
-                        .cloned()
-                        .collect();
-
-                    let parsed_targets =
-                        parse_targets(&targets, instances::list::list(&http_client, config).await?)
-                            .await?;
-
-                    let request = new::ServiceProvisionRequest {
-                        region: "dev".to_string(),
-                        name: subdomain.to_string(),
-                        configuration: new::ServiceConfiguration::Http {
-                            host: host.to_string(),
-                        },
-                        instance_targets: parsed_targets,
-                    };
-                    let response = new::new_service(request, &http_client, config).await?;
-                    println!(
-                        "Service created with ID: {} \nHost: https://{host}",
-                        response.service_id
-                    );
-                }
-                _ => {
-                    eprintln!("Unknown service command");
-                }
+        Some(("location", location_matches)) => match location_matches.subcommand() {
+            Some(("add", args)) => location::add_location(&http_client, config, args).await,
+            Some(("delete", args)) => location::delete_location(&http_client, config, args).await,
+            _ => {
+                eprintln!("Unknown location command");
+                Ok(())
             }
+        },
+        Some(("new", args)) => {
+            let name = args.get_one::<String>("name").unwrap();
+            let host = args.get_one::<String>("host").unwrap();
+            let allow_http = args.get_flag("allow_http");
+
+            let (host, _) = as_domain(host)
+                .map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
+
+            // Create default configuration with a single "/" location pointing to default service group
+            let configuration = new::HTTPServiceConfig {
+                locations: vec![new::HTTPLocation {
+                    path: "/".to_string(),
+                    override_404: None,
+                    target: new::HTTPLocationTarget::Service { group: None },
+                }],
+                allow_http,
+            };
+
+            let request = new::ServiceProvisionRequest {
+                region: "dev".to_string(),
+                name: name.to_string(),
+                host: host.to_string(),
+                configuration,
+                instance_targets: vec![],
+            };
+
+            let response = new::new_service(request, &http_client, config).await?;
+            println!(
+                "Service created with ID: {} \nHost: https://{}",
+                response.service_id, host
+            );
+            println!(
+                "\nUse 'unisrv srv target add {}' to add instance targets",
+                response.service_id
+            );
+            println!(
+                "Use 'unisrv srv location add {}' to configure routing",
+                response.service_id
+            );
+
             Ok(())
         }
         Some((_, _)) => {
@@ -271,20 +307,6 @@ pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) ->
     ))
 }
 
-async fn parse_targets(
-    targets: &[String],
-    list: InstanceListResponse,
-) -> Result<Vec<ServiceInstanceTarget>> {
-    let mut parsed_targets: Vec<ServiceInstanceTarget> = Vec::with_capacity(targets.len());
-    for target in targets {
-        let (id, port) = parse_target(&target, &list).await?;
-        parsed_targets.push(ServiceInstanceTarget {
-            instance_id: id,
-            instance_port: port,
-        });
-    }
-    Ok(parsed_targets)
-}
 
 fn as_domain(host: &str) -> Result<(String, String)> {
     if host.ends_with(".unisrv.dev") {

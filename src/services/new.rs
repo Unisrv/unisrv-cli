@@ -5,26 +5,51 @@ use uuid::Uuid;
 
 use crate::config::CliConfig;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
-pub enum ServiceConfiguration {
-    #[serde(rename = "tcp")]
-    Tcp,
-    #[serde(rename = "http")]
-    Http { host: String },
+#[serde(rename_all = "snake_case")]
+pub enum HTTPLocationTarget {
+    Service { group: Option<String> },
+    Url { url: String },
+}
+
+impl Default for HTTPLocationTarget {
+    fn default() -> Self {
+        HTTPLocationTarget::Service { group: None }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HTTPLocation {
+    pub path: String,
+    #[serde(default)]
+    pub override_404: Option<String>,
+    #[serde(default)]
+    pub target: HTTPLocationTarget,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HTTPServiceConfig {
+    #[serde(default)]
+    pub locations: Vec<HTTPLocation>,
+    #[serde(default)]
+    pub allow_http: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceInstanceTarget {
     pub instance_id: Uuid,
     pub instance_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct ServiceProvisionRequest {
     pub region: String,
     pub name: String,
-    pub configuration: ServiceConfiguration,
+    pub host: String,
+    pub configuration: HTTPServiceConfig,
     #[serde(default)]
     pub instance_targets: Vec<ServiceInstanceTarget>,
 }

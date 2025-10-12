@@ -2,14 +2,15 @@ use anyhow::Result;
 use console::Emoji;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{config::CliConfig, default_spinner, error};
+use super::new::HTTPServiceConfig;
 
 static SERVICE: Emoji = Emoji("🔌 ", "");
 static PROVIDER: Emoji = Emoji("🌐 ", "");
 static TARGET: Emoji = Emoji("🎯 ", "");
+static LOCATION: Emoji = Emoji("📍 ", "");
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceProvider {
@@ -23,6 +24,7 @@ pub struct ServiceProvider {
 pub struct ServiceTarget {
     pub id: Uuid,
     pub instance_id: Uuid,
+    pub target_group: Option<String>,
     pub instance_port: u16,
     pub created_at: String,
 }
@@ -31,10 +33,8 @@ pub struct ServiceTarget {
 pub struct ServiceInfoResponse {
     pub id: Uuid,
     pub name: String,
-    #[serde(rename = "type")]
-    pub service_type: String,
-    pub configuration: Value,
-    pub user_id: Uuid,
+    pub configuration: HTTPServiceConfig,
+    pub user_id: Option<Uuid>,
     pub created_at: String,
     pub updated_at: String,
     pub providers: Vec<ServiceProvider>,
@@ -88,7 +88,7 @@ fn display_service_info(service: &ServiceInfoResponse) {
         ),
         (
             "Type".to_string(),
-            console::style(service.service_type.clone()).cyan(),
+            console::style("HTTP".to_string()).cyan(),
         ),
         (
             "Created".to_string(),
@@ -97,6 +97,52 @@ fn display_service_info(service: &ServiceInfoResponse) {
     ];
 
     crate::table::draw_info_section(header, fields);
+
+    // Display HTTP configuration
+    println!("{} Configuration", console::style("⚙️").bold());
+    println!("  Allow HTTP: {}", if service.configuration.allow_http {
+        console::style("Yes").green()
+    } else {
+        console::style("No").red()
+    });
+    println!();
+
+    // Display locations
+    if !service.configuration.locations.is_empty() {
+        let locations_header = format!("{} Locations ({})", LOCATION, service.configuration.locations.len());
+        let headers = vec![
+            "PATH".to_string(),
+            "TARGET".to_string(),
+            "OVERRIDE 404".to_string(),
+        ];
+
+        let mut content = Vec::new();
+        for location in &service.configuration.locations {
+            let target_str = match &location.target {
+                super::new::HTTPLocationTarget::Service { group } => {
+                    if let Some(g) = group {
+                        format!("service (group: {})", g)
+                    } else {
+                        "service (default)".to_string()
+                    }
+                }
+                super::new::HTTPLocationTarget::Url { url } => {
+                    format!("url: {}", url)
+                }
+            };
+            content.push(vec![
+                location.path.clone(),
+                target_str,
+                location.override_404.clone().unwrap_or_else(|| "-".to_string()),
+            ]);
+        }
+
+        crate::table::draw_table(locations_header, headers, content);
+        println!();
+    } else {
+        println!("{} No locations configured", console::style("ℹ️").dim());
+        println!();
+    }
 
     if !service.providers.is_empty() {
         let providers_header = format!("{} Providers ({})", PROVIDER, service.providers.len());
@@ -123,6 +169,7 @@ fn display_service_info(service: &ServiceInfoResponse) {
             "ID".to_string(),
             "INSTANCE ID".to_string(),
             "PORT".to_string(),
+            "GROUP".to_string(),
         ];
 
         let mut content = Vec::new();
@@ -131,6 +178,7 @@ fn display_service_info(service: &ServiceInfoResponse) {
                 target.id.to_string(),
                 target.instance_id.to_string(),
                 target.instance_port.to_string(),
+                target.target_group.clone().unwrap_or_else(|| "-".to_string()),
             ]);
         }
 

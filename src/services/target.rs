@@ -14,6 +14,8 @@ static DELETE: Emoji = Emoji("🗑️ ", "");
 pub struct ServiceInstanceTarget {
     pub instance_id: Uuid,
     pub instance_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,6 +30,7 @@ pub async fn add_target(
 ) -> Result<()> {
     let service_id = args.get_one::<String>("service_id").unwrap();
     let target = args.get_one::<String>("target").unwrap();
+    let group = args.get_one::<String>("group").cloned();
 
     let progress = default_spinner();
     progress.set_prefix("Resolving service...");
@@ -45,6 +48,7 @@ pub async fn add_target(
     let target_request = ServiceInstanceTarget {
         instance_id,
         instance_port: port,
+        group: group.clone(),
     };
 
     progress.set_prefix("Adding target...");
@@ -60,14 +64,20 @@ pub async fn add_target(
 
     if response.status().is_success() {
         let create_response: CreateTargetResponse = response.json().await?;
+        let group_str = if let Some(g) = group {
+            format!(" [group: {}]", console::style(g).magenta())
+        } else {
+            String::new()
+        };
         println!(
-            "{} {} Target {} added to service {} ({}:{})",
+            "{} {} Target {} added to service {} ({}:{}{})",
             ADD,
             TARGET,
             console::style(&create_response.target_id.to_string()[..8]).yellow(),
             console::style(&resolved_service_id.to_string()[..8]).cyan(),
             console::style(&instance_id.to_string()[..8]).green(),
-            console::style(port).blue()
+            console::style(port).blue(),
+            group_str
         );
     } else {
         error::handle_http_error(response, "add target").await?;

@@ -13,8 +13,6 @@ static LIST: Emoji = Emoji("📋 ", "");
 pub struct Service {
     pub id: Uuid,
     pub name: String,
-    #[serde(rename = "type")]
-    pub service_type: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -49,7 +47,7 @@ pub async fn list_services(
 
         let title_with_emoji = format!("{SERVICE} Services");
 
-        let headers = vec!["ID".to_string(), "NAME".to_string(), "TYPE".to_string()];
+        let headers = vec!["ID".to_string(), "NAME".to_string()];
 
         let mut content = Vec::new();
         for service in resp.services {
@@ -57,7 +55,6 @@ pub async fn list_services(
             content.push(vec![
                 short_id.to_string(),
                 service.name,
-                service.service_type,
             ]);
         }
 
