@@ -9,13 +9,13 @@ use crate::config::CliConfig;
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum HTTPLocationTarget {
-    Service { group: Option<String> },
+    Instance { group: Option<String> },
     Url { url: String },
 }
 
 impl Default for HTTPLocationTarget {
     fn default() -> Self {
-        HTTPLocationTarget::Service { group: None }
+        HTTPLocationTarget::Instance { group: None }
     }
 }
 

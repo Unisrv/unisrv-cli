@@ -119,11 +119,11 @@ fn display_service_info(service: &ServiceInfoResponse) {
         let mut content = Vec::new();
         for location in &service.configuration.locations {
             let target_str = match &location.target {
-                super::new::HTTPLocationTarget::Service { group } => {
+                super::new::HTTPLocationTarget::Instance { group } => {
                     if let Some(g) = group {
-                        format!("service (group: {})", g)
+                        format!("instance (group: {})", g)
                     } else {
-                        "service (default)".to_string()
+                        "instance (default)".to_string()
                     }
                 }
                 super::new::HTTPLocationTarget::Url { url } => {

@@ -119,7 +119,24 @@ pub fn command() -> Command {
             Command::new("location")
                 .alias("loc")
                 .about("Manage service locations")
-                .subcommand_required(true)
+                .subcommand_required(false)
+                .arg(
+                    Arg::new("service_id")
+                        .help("Service UUID or name (defaults to list locations)")
+                        .required(false)
+                        .index(1),
+                )
+                .subcommand(
+                    Command::new("list")
+                        .alias("ls")
+                        .about("List all locations for a service")
+                        .arg(
+                            Arg::new("service_id")
+                                .help("Service UUID or name")
+                                .required(true)
+                                .index(1),
+                        ),
+                )
                 .subcommand(
                     Command::new("add")
                         .about("Add a location to a service")
@@ -137,13 +154,13 @@ pub fn command() -> Command {
                         )
                         .arg(
                             Arg::new("target_type")
-                                .help("Target type: 'service', 'srv', or 'url'")
+                                .help("Target type: 'instance', 'inst', or 'url'")
                                 .required(true)
                                 .index(3),
                         )
                         .arg(
                             Arg::new("target_value")
-                                .help("Target value: group name for service, or URL for url type")
+                                .help("Target value: group name for instance, or URL for url type")
                                 .required(false)
                                 .index(4),
                         )
@@ -188,11 +205,16 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
             }
         },
         Some(("location", location_matches)) => match location_matches.subcommand() {
+            Some(("list", args)) => location::list_locations(&http_client, config, args).await,
             Some(("add", args)) => location::add_location(&http_client, config, args).await,
             Some(("delete", args)) => location::delete_location(&http_client, config, args).await,
-            _ => {
+            Some((_, _)) => {
                 eprintln!("Unknown location command");
                 Ok(())
+            }
+            None => {
+                // Default to listing locations when no subcommand is provided
+                location::list_locations(&http_client, config, location_matches).await
             }
         },
         Some(("new", args)) => {
@@ -203,12 +225,12 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
             let (host, _) = as_domain(host)
                 .map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
 
-            // Create default configuration with a single "/" location pointing to default service group
+            // Create default configuration with a single "/" location pointing to default instance group
             let configuration = new::HTTPServiceConfig {
                 locations: vec![new::HTTPLocation {
                     path: "/".to_string(),
                     override_404: None,
-                    target: new::HTTPLocationTarget::Service { group: None },
+                    target: new::HTTPLocationTarget::Instance { group: None },
                 }],
                 allow_http,
             };
