@@ -4,8 +4,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::CliConfig, default_spinner, error};
 use super::new::HTTPServiceConfig;
+use crate::{config::CliConfig, default_spinner, error};
 
 static SERVICE: Emoji = Emoji("🔌 ", "");
 static PROVIDER: Emoji = Emoji("🌐 ", "");
@@ -100,16 +100,23 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     // Display HTTP configuration
     println!("{} Configuration", console::style("⚙️").bold());
-    println!("  Allow HTTP: {}", if service.configuration.allow_http {
-        console::style("Yes").green()
-    } else {
-        console::style("No").red()
-    });
+    println!(
+        "  Allow HTTP: {}",
+        if service.configuration.allow_http {
+            console::style("Yes").green()
+        } else {
+            console::style("No").red()
+        }
+    );
     println!();
 
     // Display locations
     if !service.configuration.locations.is_empty() {
-        let locations_header = format!("{} Locations ({})", LOCATION, service.configuration.locations.len());
+        let locations_header = format!(
+            "{} Locations ({})",
+            LOCATION,
+            service.configuration.locations.len()
+        );
         let headers = vec![
             "PATH".to_string(),
             "TARGET".to_string(),
@@ -133,7 +140,10 @@ fn display_service_info(service: &ServiceInfoResponse) {
             content.push(vec![
                 location.path.clone(),
                 target_str,
-                location.override_404.clone().unwrap_or_else(|| "-".to_string()),
+                location
+                    .override_404
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
             ]);
         }
 
@@ -178,7 +188,10 @@ fn display_service_info(service: &ServiceInfoResponse) {
                 target.id.to_string(),
                 target.instance_id.to_string(),
                 target.instance_port.to_string(),
-                target.target_group.clone().unwrap_or_else(|| "-".to_string()),
+                target
+                    .target_group
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
             ]);
         }
 

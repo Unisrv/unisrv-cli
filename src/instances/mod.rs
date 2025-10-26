@@ -127,7 +127,11 @@ pub fn command() -> Command {
             )
 }
 
-pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_matches: &clap::ArgMatches) -> Result<()> {
+pub async fn handle(
+    config: &mut CliConfig,
+    http_client: &Client,
+    instance_matches: &clap::ArgMatches,
+) -> Result<()> {
     match instance_matches.subcommand() {
         Some(("run", run_matches)) => {
             config.ensure_auth()?;
@@ -188,7 +192,8 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
             let uuid = logs_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required");
-            let uuid = resolve_uuid_any_state(uuid, &list::list(&http_client, config).await?).await?;
+            let uuid =
+                resolve_uuid_any_state(uuid, &list::list(&http_client, config).await?).await?;
             let tail = logs_matches.get_one::<bool>("tail").unwrap_or(&false);
             if *tail {
                 logs::stream_logs(&http_client, config, uuid, None).await
@@ -272,11 +277,18 @@ pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Res
     resolve_uuid_with_filter(input, list, true)
 }
 
-pub async fn resolve_uuid_any_state(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
+pub async fn resolve_uuid_any_state(
+    input: &str,
+    list: &list::InstanceListResponse,
+) -> Result<Uuid> {
     resolve_uuid_with_filter(input, list, false)
 }
 
-fn resolve_uuid_with_filter(input: &str, list: &list::InstanceListResponse, running_only: bool) -> Result<Uuid> {
+fn resolve_uuid_with_filter(
+    input: &str,
+    list: &list::InstanceListResponse,
+    running_only: bool,
+) -> Result<Uuid> {
     // First try to parse as UUID
     if let Ok(parsed_uuid) = Uuid::parse_str(input) {
         return Ok(parsed_uuid);
@@ -299,7 +311,8 @@ fn resolve_uuid_with_filter(input: &str, list: &list::InstanceListResponse, runn
             .instances
             .iter()
             .filter(|instance| {
-                (!running_only || instance.state == RUNNING_STATE) && instance.id.to_string().starts_with(input)
+                (!running_only || instance.state == RUNNING_STATE)
+                    && instance.id.to_string().starts_with(input)
             })
             .collect::<Vec<_>>();
 

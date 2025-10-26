@@ -126,11 +126,7 @@ fn handle_log_message(message: InstanceLogMessage, progress: Option<&mut Progres
     false
 }
 
-pub async fn get_logs(
-    client: &Client,
-    config: &mut CliConfig,
-    uuid: Uuid,
-) -> Result<()> {
+pub async fn get_logs(client: &Client, config: &mut CliConfig, uuid: Uuid) -> Result<()> {
     let response = client
         .get(config.url(&format!("/instance/{uuid}/logs")))
         .bearer_auth(config.token(client).await?)

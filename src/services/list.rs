@@ -52,10 +52,7 @@ pub async fn list_services(
         let mut content = Vec::new();
         for service in resp.services {
             let short_id = &service.id.to_string()[..8];
-            content.push(vec![
-                short_id.to_string(),
-                service.name,
-            ]);
+            content.push(vec![short_id.to_string(), service.name]);
         }
 
         crate::table::draw_table(title_with_emoji, headers, content);

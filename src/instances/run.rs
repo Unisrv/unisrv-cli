@@ -29,10 +29,16 @@ pub async fn run_instance(
     params: RunInstanceParams<'_>,
 ) -> Result<()> {
     // Step 1: Parse container image as Reference
-    let reference = Reference::from_str(params.container_image)
-        .map_err(|e| anyhow::anyhow!("Invalid container image reference '{}': {}", params.container_image, e))?;
+    let reference = Reference::from_str(params.container_image).map_err(|e| {
+        anyhow::anyhow!(
+            "Invalid container image reference '{}': {}",
+            params.container_image,
+            e
+        )
+    })?;
 
-    log::debug!("Parsed image reference: registry={}, repository={}, tag={}",
+    log::debug!(
+        "Parsed image reference: registry={}, repository={}, tag={}",
         reference.resolve_registry(),
         reference.repository(),
         reference.tag().unwrap_or("latest")

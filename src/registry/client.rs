@@ -169,7 +169,9 @@ pub async fn get_token(
 
     // If no credentials and not Docker Hub, error
     if username.is_none() && registry != "index.docker.io" {
-        let program = std::env::args().nth(0).unwrap_or_else(|| "unisrv".to_string());
+        let program = std::env::args()
+            .nth(0)
+            .unwrap_or_else(|| "unisrv".to_string());
         return Err(anyhow!(
             "No credentials found for registry '{}'. Please login first with: {} registry login {} -u <username> --password-stdin",
             registry,

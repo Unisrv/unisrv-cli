@@ -23,12 +23,8 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
     };
 
     // Perform the actual login
-    let token_response = client::login_registry(
-        registry,
-        username.as_deref(),
-        password.as_deref(),
-    )
-    .await?;
+    let token_response =
+        client::login_registry(registry, username.as_deref(), password.as_deref()).await?;
 
     // Display the results
     println!("{}", style("Registry Login Successful").green().bold());
@@ -46,10 +42,10 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
 
     if let Some(ref token_str) = token {
         println!(
-            "\nToken (first 50 chars): {}",
-            style(&token_str[..token_str.len().min(50)]).dim()
+            "\nToken (first 8 chars): {}",
+            style(&token_str[..token_str.len().min(8)]).dim()
         );
-        if token_str.len() > 50 {
+        if token_str.len() > 8 {
             println!("{}", style("... (truncated)").dim());
         }
     } else {
@@ -59,9 +55,9 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
         );
     }
 
-    let token_expiry = token_response.expires_in.map(|expires_in| {
-        chrono::Utc::now() + chrono::Duration::try_seconds(expires_in).unwrap()
-    });
+    let token_expiry = token_response
+        .expires_in
+        .map(|expires_in| chrono::Utc::now() + chrono::Duration::try_seconds(expires_in).unwrap());
 
     if let Some(expires_in) = token_response.expires_in {
         println!(
@@ -74,13 +70,12 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
     // Store credentials in config
     match config.save_registry_auth(registry, username, password, token, token_expiry) {
         Ok(_) => {
-            println!(
-                "\n{}",
-                style("✓ Credentials saved successfully").green()
-            );
+            println!("\n{}", style("✓ Credentials saved successfully").green());
         }
         Err(e) => {
-            let program = std::env::args().nth(0).unwrap_or_else(|| "unisrv".to_string());
+            let program = std::env::args()
+                .nth(0)
+                .unwrap_or_else(|| "unisrv".to_string());
             eprintln!(
                 "\n{} {}",
                 style("Warning:").yellow().bold(),
@@ -88,9 +83,12 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
             );
             eprintln!(
                 "  {}",
-                style(format!("You may need to login to unisrv first with: {} login", program))
-                    .dim()
-                    .italic()
+                style(format!(
+                    "You may need to login to unisrv first with: {} login",
+                    program
+                ))
+                .dim()
+                .italic()
             );
         }
     }

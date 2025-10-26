@@ -191,7 +191,11 @@ pub fn command() -> Command {
         )
 }
 
-pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_matches: &clap::ArgMatches) -> Result<()> {
+pub async fn handle(
+    config: &mut CliConfig,
+    http_client: &Client,
+    instance_matches: &clap::ArgMatches,
+) -> Result<()> {
     match instance_matches.subcommand() {
         Some(("list", args)) => list::list_services(&http_client, config, args).await,
         Some(("show", args)) => info::get_service_info(&http_client, config, args).await,
@@ -222,8 +226,8 @@ pub async fn handle(config: &mut CliConfig, http_client: &Client, instance_match
             let host = args.get_one::<String>("host").unwrap();
             let allow_http = args.get_flag("allow_http");
 
-            let (host, _) = as_domain(host)
-                .map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
+            let (host, _) =
+                as_domain(host).map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
 
             // Create default configuration with a single "/" location pointing to default instance group
             let configuration = new::HTTPServiceConfig {
@@ -328,7 +332,6 @@ pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) ->
         input
     ))
 }
-
 
 fn as_domain(host: &str) -> Result<(String, String)> {
     if host.ends_with(".unisrv.dev") {
