@@ -1,3 +1,4 @@
+mod expose;
 pub mod list;
 mod logs;
 mod run;
@@ -125,6 +126,22 @@ pub fn command() -> Command {
                         .action(clap::ArgAction::SetTrue),
                 )
             )
+        .subcommand(
+            Command::new("expose")
+                .about("Expose a TCP port publicly via proxy")
+                .arg_required_else_help(true)
+                .arg(
+                    Arg::new("instance_id")
+                        .help("The UUID, name, or UUID prefix of the instance")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("port")
+                        .help("The port number to expose")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u16).range(1..=65535)),
+                )
+            )
 }
 
 pub async fn handle(
@@ -200,6 +217,16 @@ pub async fn handle(
             } else {
                 logs::get_logs(&http_client, config, uuid).await
             }
+        }
+        Some(("expose", expose_matches)) => {
+            config.ensure_auth()?;
+            let instance_id = expose_matches
+                .get_one::<String>("instance_id")
+                .expect("instance_id should be required");
+            let port = expose_matches
+                .get_one::<u16>("port")
+                .expect("port should be required");
+            expose::expose_port(&http_client, config, instance_id, *port).await
         }
         Some((_, _)) => Err(anyhow::anyhow!("Unknown instance command")),
         None => {

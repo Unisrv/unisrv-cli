@@ -18,9 +18,18 @@ pub struct ServiceTargetInfo {
     #[allow(dead_code)]
     pub id: Uuid,
     pub service_id: Uuid,
-    pub service_type: String,
     pub service_name: String,
     pub instance_port: u16,
+}
+
+#[derive(Deserialize)]
+pub struct ProxiedPort {
+    #[allow(dead_code)]
+    pub id: Uuid,
+    pub port: u16,
+    pub external_address: String,
+    #[allow(dead_code)]
+    pub created_at: chrono::NaiveDateTime,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +47,7 @@ pub struct InstanceDetailResponse {
     pub network_id: Option<Uuid>,
     pub network_ip: Option<String>,
     pub service_targets: Option<Vec<ServiceTargetInfo>>,
+    pub proxied_ports: Option<Vec<ProxiedPort>>,
 }
 
 pub async fn show_instance(
@@ -59,7 +69,7 @@ pub async fn show_instance(
 
     let response = client
         .get(config.url(&format!(
-            "/instance/{resolved_id}?include_service_targets=true"
+            "/instance/{resolved_id}?include_service_targets=true&include_proxied_ports=true"
         )))
         .bearer_auth(config.token(client).await?)
         .send()
@@ -152,7 +162,6 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
             let headers = vec![
                 "SERVICE NAME".to_string(),
                 "SERVICE ID".to_string(),
-                "TYPE".to_string(),
                 "PORT".to_string(),
             ];
 
@@ -161,7 +170,6 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
                 content.push(vec![
                     target.service_name.clone(),
                     target.service_id.to_string(),
-                    target.service_type.clone(),
                     target.instance_port.to_string(),
                 ]);
             }
@@ -172,6 +180,21 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
                 "{} No service targets configured for this instance",
                 console::style("ℹ️").dim()
             );
+        }
+    }
+
+    // Display proxied ports if any
+    if let Some(ref proxied_ports) = instance.proxied_ports {
+        if !proxied_ports.is_empty() {
+            let proxied_header = format!("🌐 Proxied Ports ({})", proxied_ports.len());
+            let headers = vec!["INTERNAL PORT".to_string(), "EXTERNAL ADDRESS".to_string()];
+
+            let mut content = Vec::new();
+            for port in proxied_ports {
+                content.push(vec![port.port.to_string(), port.external_address.clone()]);
+            }
+
+            crate::table::draw_table(proxied_header, headers, content);
         }
     }
 }
