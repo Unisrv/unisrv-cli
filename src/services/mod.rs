@@ -87,8 +87,8 @@ pub fn command() -> Command {
                         )
                         .arg(
                             Arg::new("target_id")
-                                .help("Target UUID")
-                                .required(true)
+                                .help("Target UUID or prefix (omit to select interactively)")
+                                .required(false)
                                 .index(2),
                         ),
                 ),
