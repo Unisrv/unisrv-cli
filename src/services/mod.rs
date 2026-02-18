@@ -334,14 +334,8 @@ pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) ->
 }
 
 fn as_domain(host: &str) -> Result<(String, String)> {
-    if host.ends_with(".unisrv.dev") {
-        let subdomain = host.trim_end_matches(".unisrv.dev");
-        return Ok((host.to_owned(), subdomain.to_string()));
-    }
-    if host.contains('.') || host.chars().any(|c| !c.is_alphabetic() || !c.is_numeric()) {
-        return Err(anyhow::anyhow!(
-            "Invalid host format. Expected single subdomain which will be used as <subdomain>.unisrv.dev"
-        ));
+    if host.contains('.') {
+        return Ok((host.to_owned(), host.to_string()));
     }
 
     Ok((format!("{}.unisrv.dev", host), host.to_string()))
