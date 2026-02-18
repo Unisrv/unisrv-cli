@@ -126,6 +126,7 @@ pub struct CliConfig {
     use_https: bool,
 
     auth_session: Option<AuthSession>,
+    auth_loaded: bool,
 }
 
 const DEFAULT_API_HOST: &str = if cfg!(debug_assertions) {
@@ -151,7 +152,8 @@ impl CliConfig {
         CliConfig {
             api_host,
             use_https,
-            auth_session: AuthSession::init(),
+            auth_session: None,
+            auth_loaded: false,
         }
     }
 
@@ -165,7 +167,16 @@ impl CliConfig {
         format!("{}://{}{}", scheme, self.api_host, path)
     }
 
-    pub fn ensure_auth(&self) -> Result<(), anyhow::Error> {
+    /// Load auth session from keyring lazily (only on first access)
+    fn load_auth(&mut self) {
+        if !self.auth_loaded {
+            self.auth_loaded = true;
+            self.auth_session = AuthSession::init();
+        }
+    }
+
+    pub fn ensure_auth(&mut self) -> Result<(), anyhow::Error> {
+        self.load_auth();
         let program = std::env::args().nth(0).unwrap_or("<program>".to_string());
         let login_command = console::style(format!("{program} login")).bold();
 
@@ -199,6 +210,7 @@ impl CliConfig {
         };
         auth_session.save()?;
         self.auth_session = Some(auth_session);
+        self.auth_loaded = true;
         Ok(())
     }
 
@@ -245,7 +257,8 @@ impl CliConfig {
         Ok(auth_session.access_token.clone())
     }
 
-    pub fn auth_session(&self) -> Option<&AuthSession> {
+    pub fn auth_session(&mut self) -> Option<&AuthSession> {
+        self.load_auth();
         self.auth_session.as_ref()
     }
 }

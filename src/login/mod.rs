@@ -23,13 +23,12 @@ use anyhow::Result;
 pub fn command() -> Command {
     Command::new("login")
         .about("Login with a user account")
-        .arg_required_else_help(true)
         .arg(
             clap::Arg::new("username")
                 .short('u')
                 .long("username")
                 .help("Username to login with")
-                .required(true),
+                .required(false),
         )
         .arg(
             clap::Arg::new("password")
@@ -46,9 +45,21 @@ pub async fn handle(
     http_client: &Client,
     instance_matches: &clap::ArgMatches,
 ) -> Result<()> {
-    let username = instance_matches
-        .get_one::<String>("username")
-        .expect("Username is required");
+    let username = match instance_matches.get_one::<String>("username") {
+        Some(u) => u.clone(),
+        None => {
+            eprint!("Enter username: ");
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| anyhow::anyhow!("Failed to read username from stdin: {}", e))?;
+            let trimmed = input.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(anyhow::anyhow!("Username cannot be empty"));
+            }
+            trimmed
+        }
+    };
     let password = match instance_matches.get_one::<String>("password") {
         Some(p) => p.clone(),
         None => {
@@ -59,7 +70,7 @@ pub async fn handle(
     };
     let response: reqwest::Response = http_client
         .post(config.url("/auth/login/basic"))
-        .basic_auth(username, Some(password))
+        .basic_auth(&username, Some(password))
         .send()
         .await?;
     if !response.status().is_success() {

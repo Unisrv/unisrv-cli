@@ -145,7 +145,7 @@ fn parse_www_authenticate(header: &str) -> Result<(String, Option<String>, Optio
 /// Get token for image - checks stored credentials and handles Docker Hub anonymous fallback
 pub async fn get_token(
     reference: &Reference,
-    config: &crate::config::CliConfig,
+    config: &mut crate::config::CliConfig,
 ) -> Result<Option<String>> {
     let registry = reference.resolve_registry();
 
