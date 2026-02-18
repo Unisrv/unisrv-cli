@@ -223,6 +223,7 @@ impl CliConfig {
         token: Option<String>,
         token_expiry: Option<DateTime<chrono::Utc>>,
     ) -> Result<()> {
+        self.load_auth();
         let auth_session = self
             .auth_session
             .as_mut()
@@ -260,5 +261,15 @@ impl CliConfig {
     pub fn auth_session(&mut self) -> Option<&AuthSession> {
         self.load_auth();
         self.auth_session.as_ref()
+    }
+
+    /// Get saved registry credentials (returns empty map if none)
+    pub fn registry_credentials(&mut self) -> &BTreeMap<String, RegistryToken> {
+        self.load_auth();
+        static EMPTY: BTreeMap<String, RegistryToken> = BTreeMap::new();
+        self.auth_session
+            .as_ref()
+            .and_then(|s| s.container_registry_auth.as_ref())
+            .unwrap_or(&EMPTY)
     }
 }

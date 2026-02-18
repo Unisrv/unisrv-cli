@@ -3,6 +3,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod hosts;
 pub mod instances;
 pub mod login;
 pub mod networks;
