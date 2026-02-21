@@ -127,11 +127,7 @@ fn display_service_info(service: &ServiceInfoResponse) {
         for location in &service.configuration.locations {
             let target_str = match &location.target {
                 super::new::HTTPLocationTarget::Instance { group } => {
-                    if let Some(g) = group {
-                        format!("instance (group: {})", g)
-                    } else {
-                        "instance (default)".to_string()
-                    }
+                    format!("instances (group: {})", group)
                 }
                 super::new::HTTPLocationTarget::Url { url } => {
                     format!("url: {}", url)

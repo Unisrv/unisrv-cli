@@ -9,13 +9,15 @@ use crate::config::CliConfig;
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum HTTPLocationTarget {
-    Instance { group: Option<String> },
+    Instance { group: String },
     Url { url: String },
 }
 
 impl Default for HTTPLocationTarget {
     fn default() -> Self {
-        HTTPLocationTarget::Instance { group: None }
+        HTTPLocationTarget::Instance {
+            group: "default".to_string(),
+        }
     }
 }
 
@@ -40,8 +42,7 @@ pub struct HTTPServiceConfig {
 pub struct ServiceInstanceTarget {
     pub instance_id: Uuid,
     pub instance_port: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
+    pub group: String,
 }
 
 #[derive(Serialize, Debug)]

@@ -17,8 +17,7 @@ static DELETE: Emoji = Emoji("🗑️ ", "");
 pub struct ServiceInstanceTarget {
     pub instance_id: Uuid,
     pub instance_port: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
+    pub group: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,7 +32,10 @@ pub async fn add_target(
 ) -> Result<()> {
     let service_id = args.get_one::<String>("service_id").unwrap();
     let target = args.get_one::<String>("target").unwrap();
-    let group = args.get_one::<String>("group").cloned();
+    let group = args
+        .get_one::<String>("group")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
 
     let progress = default_spinner();
     progress.set_prefix("Resolving service...");
@@ -67,11 +69,7 @@ pub async fn add_target(
 
     if response.status().is_success() {
         let create_response: CreateTargetResponse = response.json().await?;
-        let group_str = if let Some(g) = group {
-            format!(" [group: {}]", console::style(g).magenta())
-        } else {
-            String::new()
-        };
+        let group_str = format!(" [group: {}]", console::style(&group).magenta());
         println!(
             "{} {} Target {} added to service {} ({}:{}{})",
             ADD,

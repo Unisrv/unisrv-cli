@@ -51,8 +51,10 @@ pub async fn add_location(
     // Parse target
     let target = match target_type.as_str() {
         "instance" | "inst" => {
-            let group =
-                target_value.and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
+            let group = target_value
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
             HTTPLocationTarget::Instance { group }
         }
         "url" => {
@@ -249,19 +251,11 @@ pub async fn list_locations(
             // Display target information
             match &location.target {
                 HTTPLocationTarget::Instance { group } => {
-                    if let Some(g) = group {
-                        println!(
-                            "     {} {}",
-                            console::style("Target:").dim(),
-                            console::style(format!("instance (group: {})", g)).cyan()
-                        );
-                    } else {
-                        println!(
-                            "     {} {}",
-                            console::style("Target:").dim(),
-                            console::style("instance (default group)").cyan()
-                        );
-                    }
+                    println!(
+                        "     {} {}",
+                        console::style("Target:").dim(),
+                        console::style(format!("instance (group: {})", group)).cyan()
+                    );
                 }
                 HTTPLocationTarget::Url { url } => {
                     println!(

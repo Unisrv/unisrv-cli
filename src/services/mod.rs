@@ -71,7 +71,7 @@ pub fn command() -> Command {
                             Arg::new("group")
                                 .long("group")
                                 .short('g')
-                                .help("Optional target group name")
+                                .help("Target group name [default: default]")
                                 .required(false),
                         ),
                 )
@@ -234,7 +234,9 @@ pub async fn handle(
                 locations: vec![new::HTTPLocation {
                     path: "/".to_string(),
                     override_404: None,
-                    target: new::HTTPLocationTarget::Instance { group: None },
+                    target: new::HTTPLocationTarget::Instance {
+                        group: "default".to_string(),
+                    },
                 }],
                 allow_http,
             };
