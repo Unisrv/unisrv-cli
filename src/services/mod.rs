@@ -8,11 +8,11 @@ use reqwest::Client;
 use uuid::Uuid;
 
 mod delete;
-mod info;
-mod list;
+pub mod info;
+pub mod list;
 mod location;
-mod new;
-mod target;
+pub mod new;
+pub mod target;
 
 pub fn command() -> Command {
     Command::new("service")

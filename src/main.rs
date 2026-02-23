@@ -19,6 +19,7 @@ async fn main() -> Result<(), Error> {
         .subcommand(unisrv::registry::command())
         .subcommand(unisrv::login::command())
         .subcommand(unisrv::auth::command())
+        .subcommand(unisrv::rollout::command())
         .get_matches();
     let mut config = unisrv::config::CliConfig::init();
     let http_client = Client::new();
@@ -45,6 +46,9 @@ async fn main() -> Result<(), Error> {
         }
         Some(("auth", instance_matches)) => {
             unisrv::auth::handle(&mut config, &http_client, instance_matches).await
+        }
+        Some(("rollout", rollout_matches)) => {
+            unisrv::rollout::handle(&mut config, &http_client, rollout_matches).await
         }
         _ => {
             eprintln!("Unknown command");

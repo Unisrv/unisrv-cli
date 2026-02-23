@@ -1,9 +1,9 @@
 mod expose;
 pub mod list;
-mod logs;
-mod run;
+pub mod logs;
+pub mod run;
 mod show;
-mod stop;
+pub mod stop;
 
 use std::collections::HashMap;
 
@@ -187,7 +187,9 @@ pub async fn handle(
                 .get_one::<u32>("timeout")
                 .cloned()
                 .unwrap_or(5_000);
-            stop::stop_instance(&http_client, config, uuid, timeout_ms).await
+            stop::stop_instance_interactive(&http_client, config, uuid, timeout_ms).await?;
+            println!("Stopped {}", &uuid.to_string()[..8]);
+            Ok(())
         }
         Some(("list", list_matches)) => {
             config.ensure_auth()?;
@@ -237,7 +239,7 @@ pub async fn handle(
     }
 }
 
-fn parse_env_vars(
+pub fn parse_env_vars(
     env_vars: Option<clap::parser::ValuesRef<'_, String>>,
 ) -> Result<Option<HashMap<String, String>>> {
     if let Some(vars) = env_vars {
@@ -258,7 +260,7 @@ fn parse_env_vars(
     }
 }
 
-fn parse_memory_mb(s: &str) -> Result<u16, String> {
+pub fn parse_memory_mb(s: &str) -> Result<u16, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Memory value cannot be empty".to_string());

@@ -3,14 +3,37 @@ use anyhow::Result;
 use reqwest::Client;
 use uuid::Uuid;
 
+/// Terminate an instance via the API with no UI side effects.
 pub async fn stop_instance(
     client: &Client,
     config: &mut CliConfig,
     uuid: Uuid,
     timeout_ms: u32,
 ) -> Result<()> {
+    let response = client
+        .delete(config.url(&format!("/instance/{uuid}")))
+        .bearer_auth(config.token(client).await?)
+        .json(&serde_json::json!({
+            "timeout_ms": timeout_ms,
+        }))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        error::handle_http_error(response, "stop instance").await
+    }
+}
+
+/// Stop an instance with an interactive spinner and elapsed-time display.
+pub async fn stop_instance_interactive(
+    client: &Client,
+    config: &mut CliConfig,
+    uuid: Uuid,
+    timeout_ms: u32,
+) -> Result<()> {
     let spinner = default_spinner();
-    spinner.set_prefix("Stopping instance...");
     spinner.set_message("Attempting graceful shutdown...");
     let spinner_clone = spinner.clone();
     let start_time = std::time::Instant::now();
@@ -32,22 +55,10 @@ pub async fn stop_instance(
         }
     });
 
-    let response = client
-        .delete(config.url(&format!("/instance/{uuid}")))
-        .bearer_auth(config.token(client).await?)
-        .json(&serde_json::json!({
-            "timeout_ms": timeout_ms,
-        }))
-        .send()
-        .await?;
+    let result = stop_instance(client, config, uuid, timeout_ms).await;
 
     spinner_clone.finish_and_clear();
     let _ = progress_task.await;
 
-    if response.status().is_success() {
-        println!("Successfully stopped instance with UUID: {uuid}");
-        Ok(())
-    } else {
-        error::handle_http_error(response, "stop instance").await
-    }
+    result
 }

@@ -50,41 +50,47 @@ pub async fn add_target(
     let (instance_id, port) =
         super::parse_target(target, &instances::list::list(client, config).await?).await?;
 
-    let target_request = ServiceInstanceTarget {
-        instance_id,
-        instance_port: port,
-        group: group.clone(),
-    };
-
     progress.set_prefix("Adding target...");
 
-    let response = client
-        .post(config.url(&format!("/service/{resolved_service_id}/target")))
-        .bearer_auth(config.token(client).await?)
-        .json(&target_request)
-        .send()
-        .await?;
+    let target_id = create_target(client, config, resolved_service_id, instance_id, port, &group).await?;
 
     progress.finish_and_clear();
 
-    if response.status().is_success() {
-        let create_response: CreateTargetResponse = response.json().await?;
-        let group_str = format!(" [group: {}]", console::style(&group).magenta());
-        println!(
-            "{} {} Target {} added to service {} ({}:{}{})",
-            ADD,
-            TARGET,
-            console::style(&create_response.target_id.to_string()[..8]).yellow(),
-            console::style(&resolved_service_id.to_string()[..8]).cyan(),
-            console::style(&instance_id.to_string()[..8]).green(),
-            console::style(port).blue(),
-            group_str
-        );
-    } else {
-        error::handle_http_error(response, "add target").await?;
-    }
+    let group_str = format!(" [group: {}]", console::style(&group).magenta());
+    println!(
+        "{} {} Target {} added to service {} ({}:{}{})",
+        ADD,
+        TARGET,
+        console::style(&target_id.to_string()[..8]).yellow(),
+        console::style(&resolved_service_id.to_string()[..8]).cyan(),
+        console::style(&instance_id.to_string()[..8]).green(),
+        console::style(port).blue(),
+        group_str
+    );
 
     Ok(())
+}
+
+pub async fn remove_target(
+    client: &Client,
+    config: &mut CliConfig,
+    service_id: Uuid,
+    target_id: Uuid,
+) -> Result<()> {
+    let response = client
+        .delete(config.url(&format!(
+            "/service/{service_id}/target/{target_id}"
+        )))
+        .bearer_auth(config.token(client).await?)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        error::handle_http_error(response, "delete target").await?;
+        unreachable!()
+    }
 }
 
 pub async fn delete_target(
@@ -116,32 +122,52 @@ pub async fn delete_target(
     let progress = default_spinner();
     progress.set_prefix("Deleting target...");
 
-    let response = client
-        .delete(config.url(&format!(
-            "/service/{resolved_service_id}/target/{target_uuid}"
-        )))
-        .bearer_auth(config.token(client).await?)
-        .send()
-        .await?;
+    remove_target(client, config, resolved_service_id, target_uuid).await?;
 
     progress.finish_and_clear();
 
-    if response.status().is_success() {
-        println!(
-            "{} {} Target {} deleted from service {}",
-            DELETE,
-            TARGET,
-            console::style(&target_uuid.to_string()[..8]).yellow(),
-            console::style(&resolved_service_id.to_string()[..8]).cyan()
-        );
-    } else {
-        error::handle_http_error(response, "delete target").await?;
-    }
+    println!(
+        "{} {} Target {} deleted from service {}",
+        DELETE,
+        TARGET,
+        console::style(&target_uuid.to_string()[..8]).yellow(),
+        console::style(&resolved_service_id.to_string()[..8]).cyan()
+    );
 
     Ok(())
 }
 
-async fn fetch_targets(
+pub async fn create_target(
+    client: &Client,
+    config: &mut CliConfig,
+    service_id: Uuid,
+    instance_id: Uuid,
+    port: u16,
+    group: &str,
+) -> Result<Uuid> {
+    let target_request = ServiceInstanceTarget {
+        instance_id,
+        instance_port: port,
+        group: group.to_string(),
+    };
+
+    let response = client
+        .post(config.url(&format!("/service/{service_id}/target")))
+        .bearer_auth(config.token(client).await?)
+        .json(&target_request)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let create_response: CreateTargetResponse = response.json().await?;
+        Ok(create_response.target_id)
+    } else {
+        error::handle_http_error(response, "add target").await?;
+        unreachable!()
+    }
+}
+
+pub async fn fetch_targets(
     service_id: &Uuid,
     client: &Client,
     config: &mut CliConfig,

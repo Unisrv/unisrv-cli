@@ -23,16 +23,14 @@ pub struct RunInstanceParams<'a> {
     pub network: Option<String>,
 }
 
-pub async fn run_instance(
-    client: &Client,
+pub async fn verify_and_get_token(
+    container_image: &str,
     config: &mut CliConfig,
-    params: RunInstanceParams<'_>,
-) -> Result<()> {
-    // Step 1: Parse container image as Reference
-    let reference = Reference::from_str(params.container_image).map_err(|e| {
+) -> Result<Option<String>> {
+    let reference = Reference::from_str(container_image).map_err(|e| {
         anyhow::anyhow!(
             "Invalid container image reference '{}': {}",
-            params.container_image,
+            container_image,
             e
         )
     })?;
@@ -44,40 +42,33 @@ pub async fn run_instance(
         reference.tag().unwrap_or("latest")
     );
 
-    // Step 2: Authenticate and verify image
-    let progress = default_spinner();
-    progress.set_message("Verifying container image...");
+    let token = registry::client::get_token(&reference, config).await?;
 
-    // Get token (checks credentials, handles Docker Hub anonymous fallback)
-    let token = registry::client::get_token(&reference, config)
-        .await
-        .map_err(|e| {
-            progress.finish_and_clear();
-            e
-        })?;
-
-    // Verify manifest exists
     registry::client::get_manifest_and_config(&reference, token.as_deref())
         .await
-        .map_err(|e| {
-            progress.finish_and_clear();
-            anyhow::anyhow!("Failed to verify container image: {}", e)
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to verify container image: {}", e))?;
 
-    let scoped_token = token;
+    Ok(token)
+}
 
+pub async fn create_instance(
+    client: &Client,
+    config: &mut CliConfig,
+    params: &RunInstanceParams<'_>,
+    scoped_token: Option<String>,
+) -> Result<Uuid> {
     // Parse and resolve network configuration if provided
-    let network_config = if let Some(network_str) = params.network {
+    let network_config = if let Some(network_str) = &params.network {
         let parts: Vec<&str> = network_str.splitn(2, '@').collect();
         let (instance_ip, network_identifier) = match parts.len() {
-            1 => (None, parts[0]), // network-name
+            1 => (None, parts[0]),
             2 => {
                 let ip = if parts[0].is_empty() {
                     None
                 } else {
                     Some(parts[0])
                 };
-                (ip, parts[1]) // [ip]@network-name
+                (ip, parts[1])
             }
             _ => {
                 return Err(anyhow::anyhow!(
@@ -87,15 +78,12 @@ pub async fn run_instance(
             }
         };
 
-        // Resolve network ID
         let network_list = networks::list::list(client, config).await?;
         let network_id = networks::resolve_network_id(network_identifier, &network_list).await?;
 
         let final_ip = if let Some(ip) = instance_ip {
-            // Explicit IP provided
             ip.to_string()
         } else {
-            // Auto-assign IP - fetch network details
             let network_response = client
                 .get(config.url(&format!("/network/{network_id}")))
                 .bearer_auth(config.token(client).await?)
@@ -103,7 +91,9 @@ pub async fn run_instance(
                 .await?;
 
             if !network_response.status().is_success() {
-                return error::handle_http_error(network_response, "fetch network details").await;
+                return error::handle_http_error(network_response, "fetch network details")
+                    .await
+                    .map(|_| unreachable!());
             }
 
             let network: networks::list::NetworkResponse = network_response.json().await?;
@@ -143,15 +133,9 @@ pub async fn run_instance(
         "container_registry_token": scoped_token,
     });
 
-    // Add network configuration if provided
     if let Some(network_config) = network_config {
         payload["network"] = network_config;
     }
-
-    progress.set_message(format!(
-        "{ROCKET} Starting instance with image: {}",
-        params.container_image
-    ));
 
     let response = client
         .post(config.url("/instance"))
@@ -167,15 +151,47 @@ pub async fn run_instance(
 
     if response.status().is_success() {
         let id = response.json::<InstanceResponse>().await?.id;
-        progress.println(format!(
-            "{} Instance {} started successfully",
-            ROCKET,
-            id.to_string().get(0..8).unwrap_or(&id.to_string())
-        ));
-        logs::stream_logs(client, config, id, Some(progress)).await?;
+        Ok(id)
     } else {
-        return error::handle_http_error(response, "start instance").await;
+        error::handle_http_error(response, "start instance")
+            .await
+            .map(|_| unreachable!())
     }
+}
+
+pub async fn run_instance(
+    client: &Client,
+    config: &mut CliConfig,
+    params: RunInstanceParams<'_>,
+) -> Result<()> {
+    let progress = default_spinner();
+    progress.set_message("Verifying container image...");
+
+    let scoped_token = verify_and_get_token(params.container_image, config)
+        .await
+        .map_err(|e| {
+            progress.finish_and_clear();
+            e
+        })?;
+
+    progress.set_message(format!(
+        "{ROCKET} Starting instance with image: {}",
+        params.container_image
+    ));
+
+    let id = create_instance(client, config, &params, scoped_token)
+        .await
+        .map_err(|e| {
+            progress.finish_and_clear();
+            e
+        })?;
+
+    progress.println(format!(
+        "{} Instance {} started successfully",
+        ROCKET,
+        id.to_string().get(0..8).unwrap_or(&id.to_string())
+    ));
+    logs::stream_logs(client, config, id, Some(progress)).await?;
 
     Ok(())
 }
