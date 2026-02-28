@@ -50,6 +50,7 @@ pub fn command() -> Command {
                         .help("Environment variables to set in the instance, specified as KEY=VALUE pairs")
                         .long("env")
                         .short('e')
+                        .action(clap::ArgAction::Append)
                 )
                 .arg(
                     Arg::new("name")
