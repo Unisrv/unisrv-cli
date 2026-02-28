@@ -218,10 +218,12 @@ pub async fn handle(
     // [1/5] Verify container image
     let pb = crate::default_spinner();
     pb.set_message(format!("[1/5] Verifying {}...", container_image));
-    let scoped_token = run::verify_and_get_token(container_image, config).await.map_err(|e| {
-        pb.finish_and_clear();
-        e
-    })?;
+    let scoped_token = run::verify_and_get_token(container_image, config)
+        .await
+        .map_err(|e| {
+            pb.finish_and_clear();
+            e
+        })?;
     pb.finish_and_clear();
 
     // [2/5] Start new instances one by one

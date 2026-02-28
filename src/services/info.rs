@@ -97,9 +97,13 @@ fn display_service_info(service: &ServiceInfoResponse) {
     if let Some(stats) = &service.statistics {
         println!(
             "📊 Statistics: {} {}  {} {}",
-            console::style(format_bytes(stats.incoming_bytes)).bold().green(),
+            console::style(format_bytes(stats.incoming_bytes))
+                .bold()
+                .green(),
             console::style("IN").bold(),
-            console::style(format_bytes(stats.outgoing_bytes)).bold().cyan(),
+            console::style(format_bytes(stats.outgoing_bytes))
+                .bold()
+                .cyan(),
             console::style("OUT").bold(),
         );
         println!();
@@ -162,14 +166,17 @@ fn display_service_info(service: &ServiceInfoResponse) {
         println!("   {}", console::style("None").dim());
     } else {
         for t in &service.targets {
-            let group = t
-                .target_group
-                .as_deref()
-                .unwrap_or("default");
+            let group = t.target_group.as_deref().unwrap_or("default");
             println!(
                 "   {} → {}:{}  {}",
                 console::style(t.id.to_string().get(..8).unwrap_or(&t.id.to_string())).yellow(),
-                console::style(t.instance_id.to_string().get(..8).unwrap_or(&t.instance_id.to_string())).cyan(),
+                console::style(
+                    t.instance_id
+                        .to_string()
+                        .get(..8)
+                        .unwrap_or(&t.instance_id.to_string())
+                )
+                .cyan(),
                 console::style(t.instance_port).bold(),
                 console::style(format!("({})", group)).dim(),
             );

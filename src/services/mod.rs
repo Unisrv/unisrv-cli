@@ -244,13 +244,19 @@ pub async fn handle(
                     msg.push_str("  You must claim a host before creating a service for it.\n");
                     msg.push_str(&format!(
                         "  Run: {} to claim it first.\n",
-                        console::style(format!("unisrv host claim {}", host)).bold().green()
+                        console::style(format!("unisrv host claim {}", host))
+                            .bold()
+                            .green()
                     ));
 
                     if !claimed_hosts.is_empty() {
                         msg.push_str("\n  Your claimed hosts:\n");
                         for h in &claimed_hosts {
-                            let cert = if h.certificate_type.is_some() { "  [TLS]" } else { "" };
+                            let cert = if h.certificate_type.is_some() {
+                                "  [TLS]"
+                            } else {
+                                ""
+                            };
                             msg.push_str(&format!("    - {}{}\n", h.host, cert));
                         }
                     }
@@ -269,11 +275,15 @@ pub async fn handle(
                 msg.push_str("  Either:\n");
                 msg.push_str(&format!(
                     "    1. Provision a certificate first:  {}\n",
-                    console::style(format!("unisrv host cert {}", host)).bold().green()
+                    console::style(format!("unisrv host cert {}", host))
+                        .bold()
+                        .green()
                 ));
                 msg.push_str(&format!(
                     "    2. Allow plain HTTP with:          {}\n",
-                    console::style(format!("unisrv srv new {} {} --allow-http", name, host)).bold().green()
+                    console::style(format!("unisrv srv new {} {} --allow-http", name, host))
+                        .bold()
+                        .green()
                 ));
                 return Err(anyhow::anyhow!("{}", msg));
             }
