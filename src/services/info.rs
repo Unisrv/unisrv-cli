@@ -8,17 +8,6 @@ use super::new::HTTPServiceConfig;
 use crate::{config::CliConfig, default_spinner, error};
 
 static SERVICE: Emoji = Emoji("🔌 ", "");
-static PROVIDER: Emoji = Emoji("🌐 ", "");
-static TARGET: Emoji = Emoji("🎯 ", "");
-static LOCATION: Emoji = Emoji("📍 ", "");
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ServiceProvider {
-    pub id: Uuid,
-    pub node_id: Uuid,
-    pub route_address: String,
-    pub created_at: String,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceTarget {
@@ -30,6 +19,12 @@ pub struct ServiceTarget {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct ServiceStatistics {
+    pub incoming_bytes: u64,
+    pub outgoing_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceInfoResponse {
     pub id: Uuid,
     pub name: String,
@@ -37,8 +32,8 @@ pub struct ServiceInfoResponse {
     pub user_id: Option<Uuid>,
     pub created_at: String,
     pub updated_at: String,
-    pub providers: Vec<ServiceProvider>,
     pub targets: Vec<ServiceTarget>,
+    pub statistics: Option<ServiceStatistics>,
 }
 
 pub async fn get_service_info(
@@ -98,10 +93,21 @@ fn display_service_info(service: &ServiceInfoResponse) {
 
     crate::table::draw_info_section(header, fields);
 
-    // Display HTTP configuration
-    println!("{} Configuration", console::style("⚙️").bold());
+    // Statistics — single prominent line
+    if let Some(stats) = &service.statistics {
+        println!(
+            "📊 Statistics: {} {}  {} {}",
+            console::style(format_bytes(stats.incoming_bytes)).bold().green(),
+            console::style("IN").bold(),
+            console::style(format_bytes(stats.outgoing_bytes)).bold().cyan(),
+            console::style("OUT").bold(),
+        );
+        println!();
+    }
+
+    // Configuration
     println!(
-        "  Allow HTTP: {}",
+        "⚙️  Allow HTTP: {}",
         if service.configuration.allow_http {
             console::style("Yes").green()
         } else {
@@ -110,89 +116,83 @@ fn display_service_info(service: &ServiceInfoResponse) {
     );
     println!();
 
-    // Display locations
-    if !service.configuration.locations.is_empty() {
-        let locations_header = format!(
-            "{} Locations ({})",
-            LOCATION,
+    // Locations — compact list
+    println!(
+        "{}",
+        console::style(format!(
+            "📍 Locations ({})",
             service.configuration.locations.len()
-        );
-        let headers = vec![
-            "PATH".to_string(),
-            "TARGET".to_string(),
-            "OVERRIDE 404".to_string(),
-        ];
-
-        let mut content = Vec::new();
-        for location in &service.configuration.locations {
-            let target_str = match &location.target {
+        ))
+        .bold()
+    );
+    if service.configuration.locations.is_empty() {
+        println!("   {}", console::style("None").dim());
+    } else {
+        for loc in &service.configuration.locations {
+            let target_str = match &loc.target {
                 super::new::HTTPLocationTarget::Instance { group } => {
-                    format!("instances (group: {})", group)
+                    format!("→ instances ({})", group)
                 }
                 super::new::HTTPLocationTarget::Url { url } => {
-                    format!("url: {}", url)
+                    format!("→ {}", url)
                 }
             };
-            content.push(vec![
-                location.path.clone(),
-                target_str,
-                location
-                    .override_404
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-            ]);
+            let suffix = loc
+                .override_404
+                .as_ref()
+                .map(|p| format!("  [404: {}]", p))
+                .unwrap_or_default();
+            println!(
+                "   {} {} {}{}",
+                console::style(&loc.path).yellow(),
+                console::style(target_str).dim(),
+                console::style(suffix).dim(),
+                ""
+            );
         }
-
-        crate::table::draw_table(locations_header, headers, content);
-        println!();
-    } else {
-        println!("{} No locations configured", console::style("ℹ️").dim());
-        println!();
     }
+    println!();
 
-    if !service.providers.is_empty() {
-        let providers_header = format!("{} Providers ({})", PROVIDER, service.providers.len());
-        let headers = vec!["ID".to_string(), "ROUTE ADDRESS".to_string()];
-
-        let mut content = Vec::new();
-        for provider in &service.providers {
-            content.push(vec![
-                provider.id.to_string(),
-                provider.route_address.clone(),
-            ]);
-        }
-
-        crate::table::draw_table(providers_header, headers, content);
-        println!();
+    // Targets — compact list
+    println!(
+        "{}",
+        console::style(format!("🎯 Targets ({})", service.targets.len())).bold()
+    );
+    if service.targets.is_empty() {
+        println!("   {}", console::style("None").dim());
     } else {
-        println!("{} No providers configured", console::style("ℹ️").dim());
-        println!();
+        for t in &service.targets {
+            let group = t
+                .target_group
+                .as_deref()
+                .unwrap_or("default");
+            println!(
+                "   {} → {}:{}  {}",
+                console::style(t.id.to_string().get(..8).unwrap_or(&t.id.to_string())).yellow(),
+                console::style(t.instance_id.to_string().get(..8).unwrap_or(&t.instance_id.to_string())).cyan(),
+                console::style(t.instance_port).bold(),
+                console::style(format!("({})", group)).dim(),
+            );
+        }
     }
+}
 
-    if !service.targets.is_empty() {
-        let targets_header = format!("{} Targets ({})", TARGET, service.targets.len());
-        let headers = vec![
-            "ID".to_string(),
-            "INSTANCE ID".to_string(),
-            "PORT".to_string(),
-            "GROUP".to_string(),
-        ];
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
 
-        let mut content = Vec::new();
-        for target in &service.targets {
-            content.push(vec![
-                target.id.to_string(),
-                target.instance_id.to_string(),
-                target.instance_port.to_string(),
-                target
-                    .target_group
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-            ]);
-        }
-
-        crate::table::draw_table(targets_header, headers, content);
+    let b = bytes as f64;
+    if b >= TB {
+        format!("{:.1}Tb", b / TB)
+    } else if b >= GB {
+        format!("{:.1}Gb", b / GB)
+    } else if b >= MB {
+        format!("{:.1}Mb", b / MB)
+    } else if b >= KB {
+        format!("{:.1}Kb", b / KB)
     } else {
-        println!("{} No targets configured", console::style("ℹ️").dim());
+        format!("{}b", bytes)
     }
 }
