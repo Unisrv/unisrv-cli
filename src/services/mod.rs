@@ -1,5 +1,6 @@
 use crate::{
     config::CliConfig,
+    hosts,
     instances::{list::InstanceListResponse, resolve_uuid},
 };
 use anyhow::{Ok, Result};
@@ -228,6 +229,54 @@ pub async fn handle(
 
             let (host, _) =
                 as_domain(host).map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
+
+            // Fetch claimed hosts and verify the domain is claimed
+            let claimed_hosts = hosts::list::list(&http_client, config).await?;
+            let matched_host = claimed_hosts.iter().find(|h| h.host == host);
+
+            let matched_host = match matched_host {
+                Some(h) => h,
+                None => {
+                    let mut msg = format!(
+                        "The host '{}' is not claimed by your account.\n\n",
+                        console::style(&host).bold().cyan()
+                    );
+                    msg.push_str("  You must claim a host before creating a service for it.\n");
+                    msg.push_str(&format!(
+                        "  Run: {} to claim it first.\n",
+                        console::style(format!("unisrv host claim {}", host)).bold().green()
+                    ));
+
+                    if !claimed_hosts.is_empty() {
+                        msg.push_str("\n  Your claimed hosts:\n");
+                        for h in &claimed_hosts {
+                            let cert = if h.certificate_type.is_some() { "  [TLS]" } else { "" };
+                            msg.push_str(&format!("    - {}{}\n", h.host, cert));
+                        }
+                    }
+
+                    return Err(anyhow::anyhow!("{}", msg));
+                }
+            };
+
+            // If HTTPS-only (default), ensure a TLS certificate is provisioned
+            if !allow_http && matched_host.certificate_type.is_none() {
+                let mut msg = format!(
+                    "The host '{}' does not have a TLS certificate provisioned.\n\n",
+                    console::style(&host).bold().cyan()
+                );
+                msg.push_str("  HTTPS-only services require a TLS certificate.\n");
+                msg.push_str("  Either:\n");
+                msg.push_str(&format!(
+                    "    1. Provision a certificate first:  {}\n",
+                    console::style(format!("unisrv host cert {}", host)).bold().green()
+                ));
+                msg.push_str(&format!(
+                    "    2. Allow plain HTTP with:          {}\n",
+                    console::style(format!("unisrv srv new {} {} --allow-http", name, host)).bold().green()
+                ));
+                return Err(anyhow::anyhow!("{}", msg));
+            }
 
             // Create default configuration with a single "/" location pointing to default instance group
             let configuration = new::HTTPServiceConfig {

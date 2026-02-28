@@ -7,7 +7,7 @@ use uuid::Uuid;
 mod cert;
 mod claim;
 mod delete;
-mod list;
+pub(crate) mod list;
 
 pub fn command() -> Command {
     Command::new("host")
