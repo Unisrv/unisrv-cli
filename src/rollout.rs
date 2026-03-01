@@ -148,8 +148,7 @@ pub async fn handle(
 
     // Resolve service ID
     let service_id =
-        services::resolve_service_id(service_id_str, services::list::list(client, config).await?)
-            .await?;
+        services::resolve_service_id(service_id_str, &services::list::list(client, config).await?)?;
 
     // Fetch service info (name + existing targets)
     let service_info = {
@@ -158,11 +157,8 @@ pub async fn handle(
             .bearer_auth(config.token(client).await?)
             .send()
             .await?;
-        if !response.status().is_success() {
-            crate::error::handle_http_error(response, "fetch service info").await?;
-            unreachable!()
-        }
-        response
+        crate::error::check_response(response, "fetch service info")
+            .await?
             .json::<services::info::ServiceInfoResponse>()
             .await?
     };
@@ -220,10 +216,7 @@ pub async fn handle(
     pb.set_message(format!("[1/5] Verifying {}...", container_image));
     let scoped_token = run::verify_and_get_token(container_image, config)
         .await
-        .map_err(|e| {
-            pb.finish_and_clear();
-            e
-        })?;
+        .inspect_err(|_| pb.finish_and_clear())?;
     pb.finish_and_clear();
 
     // [2/5] Start new instances one by one

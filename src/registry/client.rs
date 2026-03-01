@@ -76,7 +76,7 @@ pub async fn login_registry(
     }
 
     if !query_params.is_empty() {
-        auth_url.push_str("?");
+        auth_url.push('?');
         auth_url.push_str(&query_params.join("&"));
     }
 
@@ -170,7 +170,7 @@ pub async fn get_token(
     // If no credentials and not Docker Hub, error
     if username.is_none() && registry != "index.docker.io" {
         let program = std::env::args()
-            .nth(0)
+            .next()
             .unwrap_or_else(|| "unisrv".to_string());
         return Err(anyhow!(
             "No credentials found for registry '{}'. Please login first with: {} registry login {} -u <username> --password-stdin",
@@ -229,7 +229,7 @@ pub async fn get_scoped_token(
     }
     query_params.push(format!("scope={}", scope));
 
-    auth_url.push_str("?");
+    auth_url.push('?');
     auth_url.push_str(&query_params.join("&"));
 
     log::debug!("Requesting scoped token from: {}", auth_url);
@@ -311,7 +311,7 @@ pub async fn get_manifest_and_config(
                     .manifests()
                     .iter()
                     .find(|d| {
-                        d.platform().as_ref().map_or(false, |p| {
+                        d.platform().as_ref().is_some_and(|p| {
                             *p.architecture() == Arch::Amd64 && *p.os() == Os::Linux
                         })
                     })

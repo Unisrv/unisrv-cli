@@ -35,13 +35,9 @@ pub async fn list(client: &Client, config: &mut CliConfig) -> Result<InstanceLis
         .send()
         .await?;
 
-    if response.status().is_success() {
-        let resp: InstanceListResponse = response.json().await?;
-        Ok(resp)
-    } else {
-        error::handle_http_error(response, "list instances").await?;
-        unreachable!()
-    }
+    let response = error::check_response(response, "list instances").await?;
+    let resp: InstanceListResponse = response.json().await?;
+    Ok(resp)
 }
 
 pub async fn list_instances(

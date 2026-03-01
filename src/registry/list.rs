@@ -12,7 +12,7 @@ pub async fn list_registries(
 
     if registries.is_empty() {
         let program = std::env::args()
-            .nth(0)
+            .next()
             .unwrap_or_else(|| "unisrv".to_string());
         println!(
             "No registries configured. Login with: {} registry login <registry>",

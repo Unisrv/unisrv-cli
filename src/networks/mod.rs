@@ -1,9 +1,19 @@
 use crate::config::CliConfig;
+use crate::resolve::Identifiable;
 use anyhow::Result;
 use cidr::Ipv4Cidr;
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
+
+impl Identifiable for list::NetworkListItem {
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+}
 
 mod create;
 mod delete;
@@ -64,15 +74,15 @@ pub async fn handle(
     network_matches: &clap::ArgMatches,
 ) -> Result<()> {
     match network_matches.subcommand() {
-        Some(("new", args)) => create::create_network(&http_client, config, args).await,
+        Some(("new", args)) => create::create_network(http_client, config, args).await,
         Some(("show", args)) | Some(("get", args)) => {
-            show::show_network(&http_client, config, args).await
+            show::show_network(http_client, config, args).await
         }
         Some(("delete", args)) | Some(("rm", args)) => {
-            delete::delete_network(&http_client, config, args).await
+            delete::delete_network(http_client, config, args).await
         }
         Some(("list", args)) | Some(("ls", args)) => {
-            list::list_networks(&http_client, config, args).await
+            list::list_networks(http_client, config, args).await
         }
         Some((_, _)) => {
             eprintln!("Unknown network command");
@@ -80,53 +90,13 @@ pub async fn handle(
         }
         None => {
             // Default to listing networks when no subcommand is provided
-            list::list_networks(&http_client, config, &clap::ArgMatches::default()).await
+            list::list_networks(http_client, config, &clap::ArgMatches::default()).await
         }
     }
 }
 
-pub async fn resolve_network_id(input: &str, list: &list::NetworkListResponse) -> Result<Uuid> {
-    // First try to parse as UUID
-    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
-        return Ok(parsed_uuid);
-    }
-
-    // Try to find by name (exact match)
-    for network in &list.networks {
-        if network.name == input {
-            return Ok(network.id);
-        }
-    }
-
-    // If not a valid UUID and no name match, check if it could be a UUID prefix
-    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        let starts_with_input = list
-            .networks
-            .iter()
-            .filter(|network| network.id.to_string().starts_with(input))
-            .collect::<Vec<_>>();
-
-        if starts_with_input.len() == 1 {
-            return Ok(starts_with_input[0].id);
-        } else if starts_with_input.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No network found with UUID starting with '{}'",
-                input
-            ));
-        } else {
-            return Err(anyhow::anyhow!(
-                "Multiple networks ({}) found with UUID starting with '{}'.",
-                starts_with_input.len(),
-                input
-            ));
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No network found with name '{}' or UUID '{}'",
-        input,
-        input
-    ))
+pub fn resolve_network_id(input: &str, list: &list::NetworkListResponse) -> Result<Uuid> {
+    crate::resolve::resolve_id(input, &list.networks, "network")
 }
 
 pub async fn next_ip(network_cidr: Ipv4Cidr, used_ips: &[String]) -> Result<String> {

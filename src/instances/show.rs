@@ -62,7 +62,7 @@ pub async fn show_instance(
     progress.set_message(format!("🔍 Looking up instance '{instance_input}'"));
 
     // Resolve instance ID (could be UUID, name, or prefix)
-    let resolved_id = resolve_uuid(instance_input, &list::list(client, config).await?).await?;
+    let resolved_id = resolve_uuid(instance_input, &list::list(client, config).await?)?;
 
     progress.set_prefix("Loading instance info");
     progress.set_message(format!("{INFO} Loading instance details..."));
@@ -184,17 +184,17 @@ fn display_instance_info(instance: &InstanceDetailResponse) {
     }
 
     // Display proxied ports if any
-    if let Some(ref proxied_ports) = instance.proxied_ports {
-        if !proxied_ports.is_empty() {
-            let proxied_header = format!("🌐 Proxied Ports ({})", proxied_ports.len());
-            let headers = vec!["INTERNAL PORT".to_string(), "EXTERNAL ADDRESS".to_string()];
+    if let Some(ref proxied_ports) = instance.proxied_ports
+        && !proxied_ports.is_empty()
+    {
+        let proxied_header = format!("🌐 Proxied Ports ({})", proxied_ports.len());
+        let headers = vec!["INTERNAL PORT".to_string(), "EXTERNAL ADDRESS".to_string()];
 
-            let mut content = Vec::new();
-            for port in proxied_ports {
-                content.push(vec![port.port.to_string(), port.external_address.clone()]);
-            }
-
-            crate::table::draw_table(proxied_header, headers, content);
+        let mut content = Vec::new();
+        for port in proxied_ports {
+            content.push(vec![port.port.to_string(), port.external_address.clone()]);
         }
+
+        crate::table::draw_table(proxied_header, headers, content);
     }
 }

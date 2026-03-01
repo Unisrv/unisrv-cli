@@ -12,43 +12,43 @@ struct ErrorResponse {
     reason: String,
 }
 
-pub async fn handle_http_error(response: Response, operation: &str) -> Result<()> {
+/// Format a non-success HTTP response into a descriptive error.
+async fn format_http_error(response: Response, operation: &str) -> anyhow::Error {
     let status = response.status();
-
-    if status.is_success() {
-        return Ok(());
-    }
 
     match status.as_u16() {
         400..=499 => {
             if let Ok(error_body) = response.text().await {
                 if let Ok(error_response) = serde_json::from_str::<ErrorResponse>(&error_body) {
-                    return Err(anyhow!(
-                        "{}{}",
+                    return anyhow!(
+                        "{}{}: {}",
                         NO_ENTRY,
+                        operation,
                         style(error_response.reason).red()
-                    ));
+                    );
                 }
 
-                return Err(anyhow!(
-                    "{}Client error ({}): {}",
+                return anyhow!(
+                    "{}Failed to {}: client error ({}): {}",
                     ERROR,
+                    operation,
                     status.as_u16(),
                     error_body
-                ));
+                );
             }
 
-            Err(anyhow!(
-                "{}Client error: {} - {}",
+            anyhow!(
+                "{}Failed to {}: {} - {}",
                 ERROR,
+                operation,
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("Unknown error")
-            ))
+            )
         }
         503 => {
             if let Ok(error_body) = response.text().await {
                 if let Ok(error_response) = serde_json::from_str::<ErrorResponse>(&error_body) {
-                    return Err(anyhow!(
+                    return anyhow!(
                         "{}{}",
                         WARNING,
                         style(format!(
@@ -56,26 +56,36 @@ pub async fn handle_http_error(response: Response, operation: &str) -> Result<()
                             error_response.reason
                         ))
                         .yellow()
-                    ));
+                    );
                 }
 
-                return Err(anyhow!(
-                    "{}Service temporarily unavailable: {}",
-                    WARNING,
-                    error_body
-                ));
+                return anyhow!("{}Service temporarily unavailable: {}", WARNING, error_body);
             }
 
-            Err(anyhow!("{}Service temporarily unavailable", WARNING))
+            anyhow!("{}Service temporarily unavailable", WARNING)
         }
         _ => {
             let error_text = response.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "Failed to {}: {} - {}",
-                operation,
-                status,
-                error_text
-            ))
+            anyhow!("Failed to {}: {} - {}", operation, status, error_text)
         }
     }
+}
+
+/// Check that an HTTP response was successful, returning the response on success
+/// or a descriptive error on failure. This eliminates the need for `unreachable!()`
+/// after error handling.
+pub async fn check_response(response: Response, operation: &str) -> Result<Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    Err(format_http_error(response, operation).await)
+}
+
+/// Handle an HTTP error response by returning Err with a descriptive message.
+/// For code that doesn't need the response body on success, prefer `check_response`.
+pub async fn handle_http_error(response: Response, operation: &str) -> Result<()> {
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err(format_http_error(response, operation).await)
 }

@@ -1,8 +1,18 @@
 use crate::config::CliConfig;
+use crate::resolve::Identifiable;
 use anyhow::Result;
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
+
+impl Identifiable for list::HostResponse {
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.host)
+    }
+}
 
 mod cert;
 mod claim;
@@ -66,44 +76,6 @@ pub async fn handle(
     }
 }
 
-pub async fn resolve_host_id(input: &str, hosts: &[list::HostResponse]) -> Result<Uuid> {
-    // Try exact UUID parse
-    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
-        return Ok(parsed_uuid);
-    }
-
-    // Try exact domain name match
-    for host in hosts {
-        if host.host == input {
-            return Ok(host.id);
-        }
-    }
-
-    // Try UUID prefix match
-    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        let matches: Vec<_> = hosts
-            .iter()
-            .filter(|h| h.id.to_string().starts_with(input))
-            .collect();
-
-        if matches.len() == 1 {
-            return Ok(matches[0].id);
-        } else if matches.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No host found with UUID starting with '{}'",
-                input
-            ));
-        } else {
-            return Err(anyhow::anyhow!(
-                "Multiple hosts ({}) found with UUID starting with '{}'",
-                matches.len(),
-                input
-            ));
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No host found with domain or UUID '{}'",
-        input
-    ))
+pub fn resolve_host_id(input: &str, hosts: &[list::HostResponse]) -> Result<Uuid> {
+    crate::resolve::resolve_id(input, hosts, "host")
 }

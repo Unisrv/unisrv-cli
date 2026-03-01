@@ -27,7 +27,7 @@ pub async fn add_location(
 
     // Resolve service ID (could be UUID or name)
     let resolved_service_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Fetching service configuration...");
 
@@ -38,11 +38,9 @@ pub async fn add_location(
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        progress.finish_and_clear();
-        error::handle_http_error(response, "fetch service").await?;
-        return Ok(());
-    }
+    let response = error::check_response(response, "fetch service")
+        .await
+        .inspect_err(|_| progress.finish_and_clear())?;
 
     let mut service: ServiceInfoResponse = response.json().await?;
 
@@ -134,7 +132,7 @@ pub async fn delete_location(
 
     // Resolve service ID (could be UUID or name)
     let resolved_service_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Fetching service configuration...");
 
@@ -145,11 +143,9 @@ pub async fn delete_location(
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        progress.finish_and_clear();
-        error::handle_http_error(response, "fetch service").await?;
-        return Ok(());
-    }
+    let response = error::check_response(response, "fetch service")
+        .await
+        .inspect_err(|_| progress.finish_and_clear())?;
 
     let mut service: ServiceInfoResponse = response.json().await?;
 
@@ -203,7 +199,7 @@ pub async fn list_locations(
 
     // Resolve service ID (could be UUID or name)
     let resolved_service_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Fetching service configuration...");
 
@@ -214,11 +210,9 @@ pub async fn list_locations(
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        progress.finish_and_clear();
-        error::handle_http_error(response, "fetch service").await?;
-        return Ok(());
-    }
+    let response = error::check_response(response, "fetch service")
+        .await
+        .inspect_err(|_| progress.finish_and_clear())?;
 
     let service: ServiceInfoResponse = response.json().await?;
 

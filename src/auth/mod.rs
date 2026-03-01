@@ -38,12 +38,15 @@ pub async fn handle(
 ) -> Result<()> {
     match instance_matches.subcommand() {
         Some(("token", args)) => {
-            let token = config.token(&http_client).await?;
+            let token = config.token(http_client).await?;
 
             if *args.get_one::<bool>("json").unwrap_or(&false) {
+                let session = config
+                    .auth_session()
+                    .ok_or_else(|| anyhow::anyhow!("No active auth session"))?;
                 let json_token = JsonToken {
                     token,
-                    expires_at: config.auth_session().unwrap().access_token_expiry,
+                    expires_at: session.access_token_expiry,
                 };
                 println!("{}", serde_json::to_string(&json_token)?);
                 return Ok(());
@@ -51,7 +54,7 @@ pub async fn handle(
             println!("{token}");
         }
         _ => {
-            unimplemented!("Unknown auth command");
+            return Err(anyhow::anyhow!("Unknown auth command"));
         }
     }
     Ok(())

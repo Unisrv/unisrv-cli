@@ -20,7 +20,7 @@ pub async fn delete_network(
 
     // Get network list to resolve the ID
     let network_list = super::list::list(client, config).await?;
-    let network_id = resolve_network_id(network_input, &network_list).await?;
+    let network_id = resolve_network_id(network_input, &network_list)?;
 
     spinner.set_prefix("Deleting network");
     spinner.set_message(format!("{TRASH} Deleting network {network_id}"));

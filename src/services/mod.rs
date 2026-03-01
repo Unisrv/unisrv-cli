@@ -2,11 +2,21 @@ use crate::{
     config::CliConfig,
     hosts,
     instances::{list::InstanceListResponse, resolve_uuid},
+    resolve::Identifiable,
 };
 use anyhow::{Ok, Result};
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
+
+impl Identifiable for list::Service {
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+}
 
 mod delete;
 pub mod info;
@@ -198,28 +208,28 @@ pub async fn handle(
     instance_matches: &clap::ArgMatches,
 ) -> Result<()> {
     match instance_matches.subcommand() {
-        Some(("list", args)) => list::list_services(&http_client, config, args).await,
-        Some(("show", args)) => info::get_service_info(&http_client, config, args).await,
-        Some(("delete", args)) => delete::delete_service(&http_client, config, args).await,
+        Some(("list", args)) => list::list_services(http_client, config, args).await,
+        Some(("show", args)) => info::get_service_info(http_client, config, args).await,
+        Some(("delete", args)) => delete::delete_service(http_client, config, args).await,
         Some(("target", target_matches)) => match target_matches.subcommand() {
-            Some(("add", args)) => target::add_target(&http_client, config, args).await,
-            Some(("delete", args)) => target::delete_target(&http_client, config, args).await,
+            Some(("add", args)) => target::add_target(http_client, config, args).await,
+            Some(("delete", args)) => target::delete_target(http_client, config, args).await,
             _ => {
                 eprintln!("Unknown target command");
                 Ok(())
             }
         },
         Some(("location", location_matches)) => match location_matches.subcommand() {
-            Some(("list", args)) => location::list_locations(&http_client, config, args).await,
-            Some(("add", args)) => location::add_location(&http_client, config, args).await,
-            Some(("delete", args)) => location::delete_location(&http_client, config, args).await,
+            Some(("list", args)) => location::list_locations(http_client, config, args).await,
+            Some(("add", args)) => location::add_location(http_client, config, args).await,
+            Some(("delete", args)) => location::delete_location(http_client, config, args).await,
             Some((_, _)) => {
                 eprintln!("Unknown location command");
                 Ok(())
             }
             None => {
                 // Default to listing locations when no subcommand is provided
-                location::list_locations(&http_client, config, location_matches).await
+                location::list_locations(http_client, config, location_matches).await
             }
         },
         Some(("new", args)) => {
@@ -231,7 +241,7 @@ pub async fn handle(
                 as_domain(host).map_err(|e| anyhow::anyhow!("Invalid host format: {}", e))?;
 
             // Fetch claimed hosts and verify the domain is claimed
-            let claimed_hosts = hosts::list::list(&http_client, config).await?;
+            let claimed_hosts = hosts::list::list(http_client, config).await?;
             let matched_host = claimed_hosts.iter().find(|h| h.host == host);
 
             let matched_host = match matched_host {
@@ -308,7 +318,7 @@ pub async fn handle(
                 instance_targets: vec![],
             };
 
-            let response = new::new_service(request, &http_client, config).await?;
+            let response = new::new_service(request, http_client, config).await?;
             println!(
                 "Service created with ID: {} \nHost: https://{}",
                 response.service_id, host
@@ -330,19 +340,19 @@ pub async fn handle(
         }
         None => {
             // Default to listing services when no subcommand is provided
-            list::list_services(&http_client, config, &clap::ArgMatches::default()).await
+            list::list_services(http_client, config, &clap::ArgMatches::default()).await
         }
     }
 }
 
-async fn parse_target(target: &str, list: &InstanceListResponse) -> Result<(Uuid, u16)> {
+fn parse_target(target: &str, list: &InstanceListResponse) -> Result<(Uuid, u16)> {
     let parts: Vec<&str> = target.split(':').collect();
     if parts.len() != 2 {
         return Err(anyhow::anyhow!(
             "Invalid instance target format. Expected UUID:port"
         ));
     }
-    let uuid = resolve_uuid(parts[0], list).await.map_err(|e| {
+    let uuid = resolve_uuid(parts[0], list).map_err(|e| {
         anyhow::anyhow!("Failed to resolve target instance UUID {}: {}", parts[0], e)
     })?;
     let port = parts[1].parse::<u16>()?;
@@ -350,48 +360,8 @@ async fn parse_target(target: &str, list: &InstanceListResponse) -> Result<(Uuid
     Ok((uuid, port))
 }
 
-pub async fn resolve_service_id(input: &str, list: list::ServiceListResponse) -> Result<Uuid> {
-    // First try to parse as UUID
-    if let Some(parsed_uuid) = Uuid::parse_str(input).ok() {
-        return Ok(parsed_uuid);
-    }
-
-    // Try to find by name (exact match)
-    for service in &list.services {
-        if service.name == input {
-            return Ok(service.id);
-        }
-    }
-
-    // If not a valid UUID and no name match, check if it could be a UUID prefix
-    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        let starts_with_input = list
-            .services
-            .iter()
-            .filter(|service| service.id.to_string().starts_with(input))
-            .collect::<Vec<_>>();
-
-        if starts_with_input.len() == 1 {
-            return Ok(starts_with_input[0].id);
-        } else if starts_with_input.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No service found with UUID starting with '{}'",
-                input
-            ));
-        } else {
-            return Err(anyhow::anyhow!(
-                "Multiple services ({}) found with UUID starting with '{}'.",
-                starts_with_input.len(),
-                input
-            ));
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No service found with name '{}' or UUID '{}'",
-        input,
-        input
-    ))
+pub fn resolve_service_id(input: &str, list: &list::ServiceListResponse) -> Result<Uuid> {
+    crate::resolve::resolve_id(input, &list.services, "service")
 }
 
 fn as_domain(host: &str) -> Result<(String, String)> {

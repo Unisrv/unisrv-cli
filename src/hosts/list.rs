@@ -35,7 +35,7 @@ pub async fn list_hosts(
     progress.finish_and_clear();
 
     if hosts.is_empty() {
-        println!("{} No hosts found.", console::style("i").dim());
+        println!("{} No hosts found.", console::style("ℹ️").dim());
         return Ok(());
     }
 
@@ -73,11 +73,7 @@ pub async fn list(client: &Client, config: &mut CliConfig) -> Result<Vec<HostRes
         .send()
         .await?;
 
-    if response.status().is_success() {
-        let hosts: Vec<HostResponse> = response.json().await?;
-        Ok(hosts)
-    } else {
-        error::handle_http_error(response, "list hosts").await?;
-        unreachable!()
-    }
+    let response = error::check_response(response, "list hosts").await?;
+    let hosts: Vec<HostResponse> = response.json().await?;
+    Ok(hosts)
 }

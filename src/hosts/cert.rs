@@ -27,7 +27,7 @@ pub async fn request_cert(
     progress.set_prefix("Resolving host...");
 
     let hosts = super::list::list(client, config).await?;
-    let resolved_id = super::resolve_host_id(host_input, &hosts).await?;
+    let resolved_id = super::resolve_host_id(host_input, &hosts)?;
 
     let host = hosts
         .iter()

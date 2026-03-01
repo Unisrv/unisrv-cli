@@ -48,7 +48,7 @@ pub async fn get_service_info(
 
     // Resolve service ID (could be UUID or name)
     let resolved_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Loading service info...");
 
@@ -147,11 +147,10 @@ fn display_service_info(service: &ServiceInfoResponse) {
                 .map(|p| format!("  [404: {}]", p))
                 .unwrap_or_default();
             println!(
-                "   {} {} {}{}",
+                "   {} {} {}",
                 console::style(&loc.path).yellow(),
                 console::style(target_str).dim(),
                 console::style(suffix).dim(),
-                ""
             );
         }
     }
@@ -192,14 +191,14 @@ fn format_bytes(bytes: u64) -> String {
 
     let b = bytes as f64;
     if b >= TB {
-        format!("{:.1}Tb", b / TB)
+        format!("{:.1} TB", b / TB)
     } else if b >= GB {
-        format!("{:.1}Gb", b / GB)
+        format!("{:.1} GB", b / GB)
     } else if b >= MB {
-        format!("{:.1}Mb", b / MB)
+        format!("{:.1} MB", b / MB)
     } else if b >= KB {
-        format!("{:.1}Kb", b / KB)
+        format!("{:.1} KB", b / KB)
     } else {
-        format!("{}b", bytes)
+        format!("{} B", bytes)
     }
 }

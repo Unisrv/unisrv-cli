@@ -19,7 +19,7 @@ pub async fn delete_service(
 
     // Resolve service ID (could be UUID or name)
     let resolved_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Deleting service...");
 

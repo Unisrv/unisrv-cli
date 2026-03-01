@@ -98,7 +98,7 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
         }
         Err(e) => {
             let program = std::env::args()
-                .nth(0)
+                .next()
                 .unwrap_or_else(|| "unisrv".to_string());
             eprintln!(
                 "\n{} {}",

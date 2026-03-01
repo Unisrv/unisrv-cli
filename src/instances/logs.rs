@@ -81,7 +81,7 @@ impl InstanceLogMessage {
             (self.timestamp_ms / 1000) as i64,
             ((self.timestamp_ms % 1000) * 1_000_000) as u32,
         )
-        .unwrap()
+        .unwrap_or_default()
     }
 }
 
@@ -100,30 +100,33 @@ fn handle_log_message(message: InstanceLogMessage, progress: Option<&mut Progres
         }
         InstanceLogType::Stdout => println!("{}", message.message.unwrap_or_default()),
         InstanceLogType::Stderr => eprintln!("{}", message.message.unwrap_or_default()),
-        InstanceLogType::State => match message.state.expect("State without state?") {
-            VmInitState::Online => {
-                if let Some(pb) = progress {
-                    pb.set_prefix(format!("{ROCKET}Instance is online"));
-                } else {
-                    eprintln!("Instance is online");
+        InstanceLogType::State => match message.state {
+            None => return false,
+            Some(state) => match state {
+                VmInitState::Online => {
+                    if let Some(pb) = progress {
+                        pb.set_prefix(format!("{ROCKET}Instance is online"));
+                    } else {
+                        eprintln!("Instance is online");
+                    }
                 }
-            }
-            VmInitState::PullingContainerImage => {
-                if let Some(pb) = progress {
-                    pb.set_prefix(format!("{CRANE}Pulling container image"));
-                } else {
-                    eprintln!("Pulling container image...");
+                VmInitState::PullingContainerImage => {
+                    if let Some(pb) = progress {
+                        pb.set_prefix(format!("{CRANE}Pulling container image"));
+                    } else {
+                        eprintln!("Pulling container image...");
+                    }
                 }
-            }
-            VmInitState::ExecutingContainer => {
-                if let Some(pb) = progress {
-                    pb.set_prefix(format!("{CHECK}Executing container"));
-                    pb.finish_and_clear();
-                } else {
-                    eprintln!("Executing container...");
+                VmInitState::ExecutingContainer => {
+                    if let Some(pb) = progress {
+                        pb.set_prefix(format!("{CHECK}Executing container"));
+                        pb.finish_and_clear();
+                    } else {
+                        eprintln!("Executing container...");
+                    }
+                    return true;
                 }
-                return true; // Indicate that the instance is ready
-            }
+            },
         },
     };
     false
@@ -195,10 +198,10 @@ pub async fn stream_logs_until_running(
                             }
                         }
                         InstanceLogType::State => {
-                            match log_message
-                                .state
-                                .expect("State message missing state field")
-                            {
+                            let Some(state) = log_message.state else {
+                                continue;
+                            };
+                            match state {
                                 VmInitState::ExecutingContainer => {
                                     if let Some(pb) = &progress {
                                         pb.set_prefix(format!("{CHECK}Executing container"));

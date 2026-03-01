@@ -23,8 +23,7 @@ pub async fn show_network(
     progress.set_message(format!("🔍 Looking up network '{network_input}'"));
 
     // Resolve network ID (could be UUID or name)
-    let resolved_id =
-        resolve_network_id(network_input, &super::list::list(client, config).await?).await?;
+    let resolved_id = resolve_network_id(network_input, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Loading network info");
     progress.set_message(format!("{INFO} Loading network details..."));

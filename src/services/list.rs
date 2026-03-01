@@ -60,11 +60,7 @@ pub async fn list(client: &Client, config: &mut CliConfig) -> Result<ServiceList
         .send()
         .await?;
 
-    if response.status().is_success() {
-        let resp: ServiceListResponse = response.json().await?;
-        Ok(resp)
-    } else {
-        error::handle_http_error(response, "list services").await?;
-        unreachable!()
-    }
+    let response = error::check_response(response, "list services").await?;
+    let resp: ServiceListResponse = response.json().await?;
+    Ok(resp)
 }

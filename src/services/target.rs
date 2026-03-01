@@ -42,13 +42,13 @@ pub async fn add_target(
 
     // Resolve service ID (could be UUID or name)
     let resolved_service_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Parsing target...");
 
     // Parse target (instance_id:port)
     let (instance_id, port) =
-        super::parse_target(target, &instances::list::list(client, config).await?).await?;
+        super::parse_target(target, &instances::list::list(client, config).await?)?;
 
     progress.set_prefix("Adding target...");
 
@@ -91,12 +91,8 @@ pub async fn remove_target(
         .send()
         .await?;
 
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        error::handle_http_error(response, "delete target").await?;
-        unreachable!()
-    }
+    error::check_response(response, "delete target").await?;
+    Ok(())
 }
 
 pub async fn delete_target(
@@ -112,7 +108,7 @@ pub async fn delete_target(
 
     // Resolve service ID (could be UUID or name)
     let resolved_service_id =
-        super::resolve_service_id(service_id, super::list::list(client, config).await?).await?;
+        super::resolve_service_id(service_id, &super::list::list(client, config).await?)?;
 
     progress.set_prefix("Loading targets...");
 
@@ -164,13 +160,9 @@ pub async fn create_target(
         .send()
         .await?;
 
-    if response.status().is_success() {
-        let create_response: CreateTargetResponse = response.json().await?;
-        Ok(create_response.target_id)
-    } else {
-        error::handle_http_error(response, "add target").await?;
-        unreachable!()
-    }
+    let response = error::check_response(response, "add target").await?;
+    let create_response: CreateTargetResponse = response.json().await?;
+    Ok(create_response.target_id)
 }
 
 pub async fn fetch_targets(
@@ -184,13 +176,9 @@ pub async fn fetch_targets(
         .send()
         .await?;
 
-    if response.status().is_success() {
-        let service: ServiceInfoResponse = response.json().await?;
-        Ok(service.targets)
-    } else {
-        error::handle_http_error(response, "fetch service targets").await?;
-        Ok(vec![])
-    }
+    let response = error::check_response(response, "fetch service targets").await?;
+    let service: ServiceInfoResponse = response.json().await?;
+    Ok(service.targets)
 }
 
 fn resolve_target_id(input: &str, targets: &[ServiceTarget]) -> Result<Uuid> {

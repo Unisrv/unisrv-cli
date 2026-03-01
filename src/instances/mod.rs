@@ -7,11 +7,20 @@ pub mod stop;
 
 use std::collections::HashMap;
 
-use crate::{config::CliConfig, instances::list::RUNNING_STATE};
+use crate::{config::CliConfig, instances::list::RUNNING_STATE, resolve::Identifiable};
 use anyhow::Result;
 use clap::{Arg, Command};
 use reqwest::Client;
 use uuid::Uuid;
+
+impl Identifiable for list::InstanceResponse {
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
 
 pub fn command() -> Command {
     Command::new("instance")
@@ -162,7 +171,7 @@ pub async fn handle(
             let name = run_matches.get_one::<String>("name").cloned();
             let network = run_matches.get_one::<String>("network").cloned();
             run::run_instance(
-                &http_client,
+                http_client,
                 config,
                 run::RunInstanceParams {
                     container_image: run_matches
@@ -183,19 +192,19 @@ pub async fn handle(
             let uuid = rm_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required?");
-            let uuid = resolve_uuid(uuid, &list::list(&http_client, config).await?).await?;
+            let uuid = resolve_uuid(uuid, &list::list(http_client, config).await?)?;
             let timeout_ms = rm_matches
                 .get_one::<u32>("timeout")
                 .cloned()
                 .unwrap_or(5_000);
-            stop::stop_instance_interactive(&http_client, config, uuid, timeout_ms).await?;
+            stop::stop_instance_interactive(http_client, config, uuid, timeout_ms).await?;
             println!("Stopped {}", &uuid.to_string()[..8]);
             Ok(())
         }
         Some(("list", list_matches)) => {
             config.ensure_auth()?;
             list::list_instances(
-                &http_client,
+                http_client,
                 config,
                 !list_matches
                     .get_one::<bool>("include_stopped")
@@ -205,20 +214,19 @@ pub async fn handle(
         }
         Some(("show", show_matches)) => {
             config.ensure_auth()?;
-            show::show_instance(&http_client, config, show_matches).await
+            show::show_instance(http_client, config, show_matches).await
         }
         Some(("logs", logs_matches)) => {
             config.ensure_auth()?;
             let uuid = logs_matches
                 .get_one::<String>("uuid")
                 .expect("UUID should be required");
-            let uuid =
-                resolve_uuid_any_state(uuid, &list::list(&http_client, config).await?).await?;
+            let uuid = resolve_uuid_any_state(uuid, &list::list(http_client, config).await?)?;
             let tail = logs_matches.get_one::<bool>("tail").unwrap_or(&false);
             if *tail {
-                logs::stream_logs(&http_client, config, uuid, None).await
+                logs::stream_logs(http_client, config, uuid, None).await
             } else {
-                logs::get_logs(&http_client, config, uuid).await
+                logs::get_logs(http_client, config, uuid).await
             }
         }
         Some(("expose", expose_matches)) => {
@@ -229,13 +237,13 @@ pub async fn handle(
             let port = expose_matches
                 .get_one::<u16>("port")
                 .expect("port should be required");
-            expose::expose_port(&http_client, config, instance_id, *port).await
+            expose::expose_port(http_client, config, instance_id, *port).await
         }
         Some((_, _)) => Err(anyhow::anyhow!("Unknown instance command")),
         None => {
             // Default to listing instances when no subcommand is provided
             config.ensure_auth()?;
-            list::list_instances(&http_client, config, true).await
+            list::list_instances(http_client, config, true).await
         }
     }
 }
@@ -303,70 +311,15 @@ pub fn parse_memory_mb(s: &str) -> Result<u16, String> {
     Ok(mb as u16)
 }
 
-pub async fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
-    resolve_uuid_with_filter(input, list, true)
+pub fn resolve_uuid(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
+    let running: Vec<_> = list
+        .instances
+        .iter()
+        .filter(|i| i.state == RUNNING_STATE)
+        .collect();
+    crate::resolve::resolve_id(input, &running, "running instance")
 }
 
-pub async fn resolve_uuid_any_state(
-    input: &str,
-    list: &list::InstanceListResponse,
-) -> Result<Uuid> {
-    resolve_uuid_with_filter(input, list, false)
-}
-
-fn resolve_uuid_with_filter(
-    input: &str,
-    list: &list::InstanceListResponse,
-    running_only: bool,
-) -> Result<Uuid> {
-    // First try to parse as UUID
-    if let Ok(parsed_uuid) = Uuid::parse_str(input) {
-        return Ok(parsed_uuid);
-    }
-
-    // Try to find by name (exact match)
-    for instance in &list.instances {
-        if !running_only || instance.state == RUNNING_STATE {
-            if let Some(ref name) = instance.name {
-                if name == input {
-                    return Ok(instance.id);
-                }
-            }
-        }
-    }
-
-    // If not a valid UUID and no name match, check if it could be a UUID prefix
-    if input.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        let starts_with_input = list
-            .instances
-            .iter()
-            .filter(|instance| {
-                (!running_only || instance.state == RUNNING_STATE)
-                    && instance.id.to_string().starts_with(input)
-            })
-            .collect::<Vec<_>>();
-
-        if starts_with_input.len() == 1 {
-            return Ok(starts_with_input[0].id);
-        } else if starts_with_input.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No {} instance found with UUID starting with '{}'",
-                if running_only { "running" } else { "" },
-                input
-            ));
-        } else {
-            return Err(anyhow::anyhow!(
-                "Multiple instances ({}) found with UUID starting with '{}'.",
-                starts_with_input.len(),
-                input
-            ));
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No {} instance found with name '{}' or UUID '{}'",
-        if running_only { "running" } else { "" },
-        input,
-        input
-    ))
+pub fn resolve_uuid_any_state(input: &str, list: &list::InstanceListResponse) -> Result<Uuid> {
+    crate::resolve::resolve_id(input, &list.instances, "instance")
 }

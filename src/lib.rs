@@ -8,6 +8,7 @@ pub mod instances;
 pub mod login;
 pub mod networks;
 pub mod registry;
+pub mod resolve;
 pub mod rollout;
 pub mod services;
 pub mod table;

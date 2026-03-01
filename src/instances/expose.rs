@@ -30,8 +30,7 @@ pub async fn expose_port(
     progress.set_message(format!("🔍 Looking up instance '{instance_input}'"));
 
     // Resolve instance ID (could be UUID, name, or prefix)
-    let resolved_id =
-        super::resolve_uuid(instance_input, &list::list(client, config).await?).await?;
+    let resolved_id = super::resolve_uuid(instance_input, &list::list(client, config).await?)?;
 
     progress.set_prefix("Exposing port");
     progress.set_message(format!("{INFO} Exposing port {port}..."));

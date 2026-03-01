@@ -1,111 +1,23 @@
 # Unisrv CLI
 
-A Rust-based command-line interface for provisioning and managing Unisrv resources.
-A nice wrapper around the [Unisrv REST API](https://api.unisrv.io/swagger-ui/).
+Command-line interface for provisioning and managing [Unisrv](https://unisrv.io) resources.
 
-## Features
+See [unisrv.io](https://unisrv.io) for documentation.
 
-- **Instance Management**: Create, stop, list, and monitor VM instances with container images
-- **Service Management**: Manage HTTP services with load balancing, path-based routing, and target configuration
-- **Network Management**: Create and manage private networks for instance-to-instance communication
-- **Registry Authentication**: Login to private container registries (Docker Hub, GHCR, etc.) with automatic token management
-- **Secure Authentication**: Authentication token management with automatic refresh, stored in system keyring
-- **UUID Resolution**: Accept full UUIDs, UUID prefixes, or names for resource identification
-- **Real-time Monitoring**: Stream logs from running instances via WebSocket
-- **User-friendly Experience**: Progress spinners, colored output, and helpful error messages
-
-## Command Structure
-
-```
-cli
-├── instance (vm, instances) - Manage VM instances
-│   ├── run - Create new instance with container image
-│   ├── stop (rm) - Terminate instance
-│   ├── list (ls) - List instances
-│   └── logs (log) - Stream instance logs
-├── service (srv, services) - Manage HTTP services with load balancing
-│   ├── list (ls) - List services
-│   ├── show (get) - Get service details
-│   ├── delete (rm) - Delete service
-│   ├── new - Create HTTP service
-│   ├── target - Manage service targets (add/delete instance targets)
-│   └── location (loc) - Manage service locations (routing rules)
-│       ├── list (ls) - List locations (default when no subcommand)
-│       ├── add - Add/update location routing rule
-│       └── delete (rm) - Delete location
-├── network (net, networks) - Manage private networks
-│   ├── new - Create network with CIDR
-│   ├── show (get) - Get network details
-│   ├── delete (rm) - Delete network
-│   └── list (ls) - List networks
-├── registry (reg) - Manage container registry authentication
-│   ├── login - Login to a container registry
-│   └── list (ls) - List configured registries
-├── login - Authenticate with username/password
-└── auth - Authentication utilities
-    └── token - Get current auth token
-```
-
-## Build and Run
+## Install
 
 ```bash
-# Build the project
-cargo build --release
-
-# Run the CLI
-./target/release/unisrv --help
-
-# During development
-cargo run -- --help
+./install.sh
 ```
 
-## Development Commands
+This builds the binary and copies it to `~/.local/bin/unisrv`. Make sure `~/.local/bin` is in your PATH:
 
 ```bash
-# Check code
-cargo check
-
-# Run tests
-cargo test
-
-# Format code
-cargo fmt
-
-# Lint code
-cargo clippy
+export PATH=$PATH:$HOME/.local/bin
 ```
 
-## Authentication
-
-### Platform Authentication
-
-Authentication sessions are stored in the platform's keyring storage for security.
-To log in, use the following command:
+## Usage
 
 ```bash
-unisrv login --username <username>
+unisrv --help
 ```
-
-### Container Registry Authentication
-
-To use private container images, authenticate with the container registry:
-
-```bash
-# Login to a registry (password will be prompted securely)
-unisrv registry login ghcr.io --username <username>
-
-# Or pipe password from stdin (recommended for scripts)
-echo $GITHUB_TOKEN | unisrv registry login ghcr.io --username <username> --password-stdin
-
-# List configured registries
-unisrv registry list
-```
-
-**Note**: Docker Hub public images work without authentication. Private registries require authentication before running instances.
-
-## Configuration
-
-- **API Host**: Configure via `API_HOST` environment variable
-  - Debug builds default to `http://localhost:8080`
-  - Release builds default to `https://api.unisrv.io`
-- **Logging**: Set `RUST_LOG=debug` for detailed debug output

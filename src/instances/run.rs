@@ -79,7 +79,7 @@ pub async fn create_instance(
         };
 
         let network_list = networks::list::list(client, config).await?;
-        let network_id = networks::resolve_network_id(network_identifier, &network_list).await?;
+        let network_id = networks::resolve_network_id(network_identifier, &network_list)?;
 
         let final_ip = if let Some(ip) = instance_ip {
             ip.to_string()
@@ -90,11 +90,8 @@ pub async fn create_instance(
                 .send()
                 .await?;
 
-            if !network_response.status().is_success() {
-                return error::handle_http_error(network_response, "fetch network details")
-                    .await
-                    .map(|_| unreachable!());
-            }
+            let network_response =
+                error::check_response(network_response, "fetch network details").await?;
 
             let network: networks::list::NetworkResponse = network_response.json().await?;
             let network_cidr: Ipv4Cidr = network
@@ -149,14 +146,9 @@ pub async fn create_instance(
         id: Uuid,
     }
 
-    if response.status().is_success() {
-        let id = response.json::<InstanceResponse>().await?.id;
-        Ok(id)
-    } else {
-        error::handle_http_error(response, "start instance")
-            .await
-            .map(|_| unreachable!())
-    }
+    let response = error::check_response(response, "start instance").await?;
+    let id = response.json::<InstanceResponse>().await?.id;
+    Ok(id)
 }
 
 pub async fn run_instance(
@@ -169,10 +161,7 @@ pub async fn run_instance(
 
     let scoped_token = verify_and_get_token(params.container_image, config)
         .await
-        .map_err(|e| {
-            progress.finish_and_clear();
-            e
-        })?;
+        .inspect_err(|_| progress.finish_and_clear())?;
 
     progress.set_message(format!(
         "{ROCKET} Starting instance with image: {}",
@@ -181,10 +170,7 @@ pub async fn run_instance(
 
     let id = create_instance(client, config, &params, scoped_token)
         .await
-        .map_err(|e| {
-            progress.finish_and_clear();
-            e
-        })?;
+        .inspect_err(|_| progress.finish_and_clear())?;
 
     progress.println(format!(
         "{} Instance {} started successfully",
