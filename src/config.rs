@@ -59,8 +59,20 @@ impl AuthSession {
     }
 
     async fn refresh(&mut self, client: &reqwest::Client) -> Result<(), anyhow::Error> {
+        self.refresh_inner(client, false).await
+    }
+
+    async fn force_refresh(&mut self, client: &reqwest::Client) -> Result<(), anyhow::Error> {
+        self.refresh_inner(client, true).await
+    }
+
+    async fn refresh_inner(
+        &mut self,
+        client: &reqwest::Client,
+        force: bool,
+    ) -> Result<(), anyhow::Error> {
         let now = chrono::Utc::now();
-        if self.access_token_expiry > now {
+        if !force && self.access_token_expiry > now {
             return Ok(());
         }
 
@@ -128,6 +140,8 @@ pub struct CliConfig {
     auth_session: Option<AuthSession>,
     auth_loaded: bool,
 }
+
+pub const DEFAULT_REGISTRY: &str = "harbor.unisrv.io";
 
 const DEFAULT_API_HOST: &str = if cfg!(debug_assertions) {
     "http://localhost:8080"
@@ -255,6 +269,14 @@ impl CliConfig {
         self.ensure_auth()?;
         let auth_session = self.auth_session.as_mut().unwrap();
         auth_session.refresh(client).await?;
+        Ok(auth_session.access_token.clone())
+    }
+
+    /// Get a fresh access token (forces refresh), useful for passing to the default registry
+    pub async fn fresh_token(&mut self, client: &reqwest::Client) -> Result<String, anyhow::Error> {
+        self.ensure_auth()?;
+        let auth_session = self.auth_session.as_mut().unwrap();
+        auth_session.force_refresh(client).await?;
         Ok(auth_session.access_token.clone())
     }
 

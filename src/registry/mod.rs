@@ -58,6 +58,8 @@ pub async fn handle(
     http_client: &Client,
     registry_matches: &clap::ArgMatches,
 ) -> Result<()> {
+    config.ensure_auth()?;
+
     match registry_matches.subcommand() {
         Some(("login", args)) => login::login_registry(config, args).await,
         Some(("list", args)) | Some(("ls", args)) => {

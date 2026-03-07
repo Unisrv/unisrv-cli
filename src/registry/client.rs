@@ -147,7 +147,21 @@ pub async fn get_token(
     reference: &Reference,
     config: &mut crate::config::CliConfig,
 ) -> Result<Option<String>> {
+    let http_client = Client::new();
     let registry = reference.resolve_registry();
+
+    // For the default Unisrv Harbor registry, use a fresh unisrv access token directly as bearer
+    if registry == crate::config::DEFAULT_REGISTRY {
+        log::debug!("Using Unisrv auth token for default registry {}", registry);
+        let fresh_token = config.fresh_token(&http_client).await.map_err(|e| {
+            anyhow!(
+                "Failed to get auth token for {}: {}. Please login first.",
+                registry,
+                e
+            )
+        })?;
+        return Ok(Some(fresh_token));
+    }
 
     // Check if we have stored credentials
     let (username, password) = if let Some(auth_session) = config.auth_session() {

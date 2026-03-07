@@ -10,6 +10,16 @@ pub async fn login_registry(config: &mut CliConfig, args: &clap::ArgMatches) -> 
         .get_one::<String>("registry")
         .expect("Registry is required");
 
+    if registry == crate::config::DEFAULT_REGISTRY {
+        println!(
+            "{} {} is the default registry and uses your Unisrv login automatically.",
+            style("Note:").yellow().bold(),
+            style(registry).cyan(),
+        );
+        println!("No separate registry login needed.");
+        return Ok(());
+    }
+
     let username = match args.get_one::<String>("username").cloned() {
         Some(u) => Some(u),
         None => {
