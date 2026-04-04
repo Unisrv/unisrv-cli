@@ -1,0 +1,10 @@
+[package]
+name = "unisrv"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["api"]
+
+[dependencies]
+unisrv-api = { path = "api" }
