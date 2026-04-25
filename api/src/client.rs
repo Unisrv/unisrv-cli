@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::auth::{AuthSession, AuthStore};
-use crate::error::{ApiError, Result};
+use crate::auth::{AuthSession, AuthStore, LoginResponse};
+use crate::error::{ApiError, Result, extract_error_reason};
 use crate::models::*;
 
 pub const DEFAULT_API_HOST: &str = "https://api.unisrv.io";
@@ -10,6 +10,11 @@ pub const API_HOST_ENV: &str = "UNISRV_API_HOST";
 
 #[async_trait]
 pub trait ApiClient: Send + Sync {
+    // ── Auth ──
+    async fn login(&self, username: &str, password: &str) -> Result<()>;
+    async fn access_token(&self) -> Result<String>;
+    async fn auth_session(&self) -> Result<AuthSession>;
+
     // ── Environments ──
     async fn create_environment(
         &self,
@@ -137,11 +142,7 @@ impl HttpApiClient {
         Self::new(base_url)
     }
 
-    pub fn auth_store(&self) -> &AuthStore {
-        &self.auth_store
-    }
-
-    pub async fn set_session(
+    pub(crate) async fn set_session(
         &self,
         session: AuthSession,
     ) -> std::result::Result<(), anyhow::Error> {
@@ -159,41 +160,72 @@ impl HttpApiClient {
         self.session.read().await.is_some()
     }
 
-    /// Ensures the access token is fresh, refreshing if needed, and returns it.
-    async fn access_token(&self) -> Result<String> {
-        let needs_refresh = {
+    async fn ensure_access_token(&self) -> Result<String> {
+        // Fast path: token is still valid.
+        {
             let guard = self.session.read().await;
             match guard.as_ref() {
-                None => return Err(ApiError::AuthRequired("Not logged in.".into())),
+                None => return Err(ApiError::not_logged_in()),
                 Some(s) if s.expired() => {
                     return Err(ApiError::AuthRequired(
                         "Session expired. Please log in again.".into(),
                     ));
                 }
-                Some(s) => s.access_token_expired(),
+                Some(s) if !s.access_token_expired() => {
+                    return Ok(s.access_token().to_string());
+                }
+                _ => {}
             }
-        };
+        }
 
-        if needs_refresh {
-            let mut guard = self.session.write().await;
-            let session = guard.as_mut().unwrap();
+        // Slow path: acquire write lock and re-check before refreshing.
+        let mut guard = self.session.write().await;
+        let session = guard.as_mut().ok_or_else(|| ApiError::not_logged_in())?;
+
+        if session.access_token_expired() {
             session.refresh(&self.client, &self.base_url).await?;
             self.auth_store.save(session).map_err(ApiError::Other)?;
         }
 
-        let guard = self.session.read().await;
-        Ok(guard.as_ref().unwrap().access_token().to_string())
+        Ok(session.access_token().to_string())
+    }
+
+    async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response> {
+        let status = resp.status();
+        if !status.is_success() {
+            let reason = extract_error_reason(resp).await;
+            return Err(ApiError::Server {
+                status: status.as_u16(),
+                reason,
+            });
+        }
+        Ok(resp)
+    }
+
+    async fn send(&self, builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let token = self.ensure_access_token().await?;
+        let resp = builder.bearer_auth(&token).send().await?;
+        Self::check_response(resp).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .get(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .send()
-            .await?;
-        handle_response(resp).await
+        Ok(self
+            .send(self.client.get(self.url(path)))
+            .await?
+            .json()
+            .await?)
+    }
+
+    async fn post_for_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(self
+            .send(self.client.post(self.url(path)))
+            .await?
+            .json()
+            .await?)
     }
 
     async fn post<B: serde::Serialize, T: serde::de::DeserializeOwned>(
@@ -201,15 +233,11 @@ impl HttpApiClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .post(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
-        handle_response(resp).await
+        Ok(self
+            .send(self.client.post(self.url(path)).json(body))
+            .await?
+            .json()
+            .await?)
     }
 
     async fn put<B: serde::Serialize, T: serde::de::DeserializeOwned>(
@@ -217,109 +245,61 @@ impl HttpApiClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .put(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
-        handle_response(resp).await
-    }
-
-    async fn delete_req(&self, path: &str) -> Result<()> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .delete(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .send()
-            .await?;
-        handle_empty_response(resp).await
-    }
-
-    async fn delete_with_body<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<()> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .delete(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
-        handle_empty_response(resp).await
+        Ok(self
+            .send(self.client.put(self.url(path)).json(body))
+            .await?
+            .json()
+            .await?)
     }
 
     async fn put_empty<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<()> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .put(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
+        self.send(self.client.put(self.url(path)).json(body))
             .await?;
-        handle_empty_response(resp).await
+        Ok(())
     }
 
-    async fn post_for_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let token = self.access_token().await?;
-        let resp = self
-            .client
-            .post(format!("{}{path}", self.base_url))
-            .bearer_auth(&token)
-            .send()
+    async fn delete_req(&self, path: &str) -> Result<()> {
+        self.send(self.client.delete(self.url(path))).await?;
+        Ok(())
+    }
+
+    async fn delete_with_body<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        self.send(self.client.delete(self.url(path)).json(body))
             .await?;
-        handle_response(resp).await
-    }
-}
-
-async fn handle_response<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
-    let status = resp.status();
-    if !status.is_success() {
-        let reason = extract_error_reason(resp).await;
-        return Err(ApiError::Server {
-            status: status.as_u16(),
-            reason,
-        });
-    }
-    resp.json()
-        .await
-        .map_err(|e| ApiError::Serialization(format!("Failed to parse response: {e}")))
-}
-
-async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
-    let status = resp.status();
-    if !status.is_success() {
-        let reason = extract_error_reason(resp).await;
-        return Err(ApiError::Server {
-            status: status.as_u16(),
-            reason,
-        });
-    }
-    Ok(())
-}
-
-async fn extract_error_reason(resp: reqwest::Response) -> String {
-    let text = resp.text().await.unwrap_or_default();
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-        if let Some(reason) = json.get("reason").and_then(|r| r.as_str()) {
-            return reason.to_string();
-        }
-        if let Some(message) = json.get("message").and_then(|m| m.as_str()) {
-            return message.to_string();
-        }
-    }
-    if text.is_empty() {
-        "Unknown error".to_string()
-    } else {
-        text
+        Ok(())
     }
 }
 
 #[async_trait]
 impl ApiClient for HttpApiClient {
+    // ── Auth ──
+
+    async fn login(&self, username: &str, password: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/auth/login/basic", self.base_url))
+            .basic_auth(username, Some(password))
+            .send()
+            .await?;
+
+        let resp = Self::check_response(resp).await?;
+        let login_resp: LoginResponse = resp.json().await?;
+
+        let session = AuthSession::from_login_response(login_resp);
+        self.set_session(session).await.map_err(ApiError::Other)?;
+        Ok(())
+    }
+
+    async fn access_token(&self) -> Result<String> {
+        self.ensure_access_token().await
+    }
+
+    async fn auth_session(&self) -> Result<AuthSession> {
+        self.ensure_access_token().await?;
+        let guard = self.session.read().await;
+        guard.clone().ok_or_else(|| ApiError::not_logged_in())
+    }
+
     // ── Environments ──
 
     async fn create_environment(

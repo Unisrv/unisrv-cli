@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, extract_error_reason};
 
 const KEYRING_SERVICE: &str = "unisrv-cli";
 const KEYRING_USER: &str = "auth_session";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct LoginResponse {
+pub struct LoginResponse {
+    user_id: Uuid,
     token: String,
     expires_at: DateTime<Utc>,
     refresh_session_id: Uuid,
@@ -38,6 +39,31 @@ impl std::fmt::Debug for AuthSession {
 }
 
 impl AuthSession {
+    /// Create a test session with the given token and validity duration.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_session(token: &str, valid_for: chrono::Duration) -> Self {
+        let now = Utc::now();
+        AuthSession {
+            user_id: Uuid::new_v4(),
+            access_token: token.to_string(),
+            access_token_expiry: now + valid_for,
+            refresh_session_id: Uuid::new_v4(),
+            refresh_token: format!("{token}-refresh"),
+            refresh_token_expiry: now + valid_for + valid_for,
+        }
+    }
+
+    pub(crate) fn from_login_response(resp: LoginResponse) -> Self {
+        AuthSession {
+            user_id: resp.user_id,
+            access_token: resp.token,
+            access_token_expiry: resp.expires_at,
+            refresh_session_id: resp.refresh_session_id,
+            refresh_token: resp.refresh_token,
+            refresh_token_expiry: resp.refresh_expires_at,
+        }
+    }
+
     pub fn access_token(&self) -> &str {
         &self.access_token
     }
@@ -56,7 +82,10 @@ impl AuthSession {
         client: &reqwest::Client,
         base_url: &str,
     ) -> Result<(), ApiError> {
-        self.refresh_inner(client, base_url, false).await
+        if self.access_token_expiry > Utc::now() {
+            return Ok(());
+        }
+        self.force_refresh(client, base_url).await
     }
 
     pub async fn force_refresh(
@@ -64,22 +93,7 @@ impl AuthSession {
         client: &reqwest::Client,
         base_url: &str,
     ) -> Result<(), ApiError> {
-        self.refresh_inner(client, base_url, true).await
-    }
-
-    async fn refresh_inner(
-        &mut self,
-        client: &reqwest::Client,
-        base_url: &str,
-        force: bool,
-    ) -> Result<(), ApiError> {
-        let now = Utc::now();
-
-        if !force && self.access_token_expiry > now {
-            return Ok(());
-        }
-
-        if self.refresh_token_expiry < now {
+        if self.refresh_token_expiry < Utc::now() {
             return Err(ApiError::AuthRequired(
                 "Refresh token has expired. Please log in again.".into(),
             ));
@@ -96,24 +110,13 @@ impl AuthSession {
             .await?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-
-            if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&error_text) {
-                if let Some(reason) = error_json.get("reason").and_then(|r| r.as_str()) {
-                    return Err(ApiError::AuthRequired(format!(
-                        "Failed to refresh tokens: {reason}. Please login again."
-                    )));
-                }
-            }
-
-            return Err(ApiError::AuthRequired(
-                "Failed to refresh tokens. Please log in again.".into(),
-            ));
+            let reason = extract_error_reason(response).await;
+            return Err(ApiError::AuthRequired(format!(
+                "Failed to refresh tokens: {reason}. Please login again."
+            )));
         }
 
-        let resp: LoginResponse = response.json().await.map_err(|e| {
-            ApiError::Serialization(format!("Failed to parse refresh response: {e}"))
-        })?;
+        let resp: LoginResponse = response.json().await?;
 
         self.access_token = resp.token;
         self.access_token_expiry = resp.expires_at;
@@ -121,18 +124,15 @@ impl AuthSession {
         self.refresh_token = resp.refresh_token;
         self.refresh_token_expiry = resp.refresh_expires_at;
 
-        log::debug!("Auth session refreshed successfully");
+        tracing::debug!("Auth session refreshed successfully");
         Ok(())
     }
 }
 
 // ── Storage ──
 
-fn auth_file_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".unisrv")
-        .join("auth.json")
+fn auth_file_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".unisrv").join("auth.json"))
 }
 
 /// Persistent auth storage that tries keyring first, then falls back to a JSON file.
@@ -144,60 +144,48 @@ pub struct AuthStore {
 impl AuthStore {
     pub fn new() -> Self {
         let keyring_entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .inspect_err(|e| log::debug!("Keyring unavailable: {e}"))
+            .inspect_err(|e| tracing::debug!("Keyring unavailable: {e}"))
             .ok();
 
         AuthStore { keyring_entry }
     }
 
     pub fn load(&self) -> Option<AuthSession> {
-        // Try keyring first
-        if let Some(session) = self.load_from_keyring() {
-            return Some(session);
-        }
-
-        // Fall back to file
-        self.load_from_file()
+        self.load_from_keyring().or_else(|| self.load_from_file())
     }
 
     pub fn save(&self, session: &AuthSession) -> Result<(), anyhow::Error> {
         let serialized = serde_json::to_string(session)?;
 
-        // Try keyring first
         if let Some(entry) = &self.keyring_entry {
             match entry.set_password(&serialized) {
                 Ok(()) => {
-                    log::debug!("Auth session saved to keyring");
-                    // Remove file if it exists since keyring is now authoritative
-                    let path = auth_file_path();
-                    if path.exists() {
+                    tracing::debug!("Auth session saved to keyring");
+                    if let Some(path) = auth_file_path() {
                         let _ = std::fs::remove_file(&path);
                     }
                     return Ok(());
                 }
-                Err(e) => log::debug!("Failed to save to keyring, falling back to file: {e}"),
+                Err(e) => tracing::debug!("Failed to save to keyring, falling back to file: {e}"),
             }
         }
 
-        // Fall back to file
         self.save_to_file(&serialized)
     }
 
     pub fn delete(&self) {
-        // Try deleting from keyring
         if let Some(entry) = &self.keyring_entry {
             if let Err(e) = entry.delete_credential() {
-                log::debug!("Failed to delete from keyring: {e}");
+                tracing::debug!("Failed to delete from keyring: {e}");
             } else {
-                log::debug!("Auth session deleted from keyring");
+                tracing::debug!("Auth session deleted from keyring");
             }
         }
 
-        // Also delete file if present
-        let path = auth_file_path();
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-            log::debug!("Auth session deleted from file");
+        if let Some(path) = auth_file_path() {
+            if std::fs::remove_file(&path).is_ok() {
+                tracing::debug!("Auth session deleted from file");
+            }
         }
     }
 
@@ -208,13 +196,15 @@ impl AuthStore {
     }
 
     fn load_from_file(&self) -> Option<AuthSession> {
-        let path = auth_file_path();
+        let path = auth_file_path()?;
         let data = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str(&data).ok()
     }
 
     fn save_to_file(&self, serialized: &str) -> Result<(), anyhow::Error> {
-        let path = auth_file_path();
+        let path = auth_file_path().ok_or_else(|| {
+            anyhow::anyhow!("Could not determine home directory for auth storage")
+        })?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -237,7 +227,7 @@ impl AuthStore {
             std::fs::write(&path, serialized)?;
         }
 
-        log::debug!("Auth session saved to file: {}", path.display());
+        tracing::debug!("Auth session saved to file: {}", path.display());
         Ok(())
     }
 }

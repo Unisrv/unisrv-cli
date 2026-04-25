@@ -8,3 +8,16 @@ members = ["api"]
 
 [dependencies]
 unisrv-api = { path = "api" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+yapp = "0.5"
+
+[dev-dependencies]
+unisrv-api = { path = "api", features = ["test-support"] }

@@ -34,6 +34,12 @@ impl From<reqwest::Error> for ApiError {
     }
 }
 
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError::Serialization(e.to_string())
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         ApiError::Other(e)
@@ -41,3 +47,27 @@ impl From<anyhow::Error> for ApiError {
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
+
+impl ApiError {
+    pub fn not_logged_in() -> Self {
+        ApiError::AuthRequired("Not logged in.".into())
+    }
+}
+
+/// Extract a human-readable error reason from an HTTP error response body.
+pub(crate) async fn extract_error_reason(resp: reqwest::Response) -> String {
+    let text = resp.text().await.unwrap_or_default();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(reason) = json.get("reason").and_then(|r| r.as_str()) {
+            return reason.to_string();
+        }
+        if let Some(message) = json.get("message").and_then(|m| m.as_str()) {
+            return message.to_string();
+        }
+    }
+    if text.is_empty() {
+        "Unknown error".to_string()
+    } else {
+        text
+    }
+}
