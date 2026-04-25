@@ -95,6 +95,7 @@ pub trait ApiClient: Send + Sync {
     async fn list_hosts(&self) -> Result<Vec<HostResponse>>;
     async fn delete_host(&self, id: Uuid) -> Result<()>;
     async fn request_host_cert(&self, id: Uuid) -> Result<HostResponse>;
+    async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse>;
 
     // ── Deployments ──
     async fn create_deployment(
@@ -494,6 +495,10 @@ impl ApiClient for HttpApiClient {
 
     async fn request_host_cert(&self, id: Uuid) -> Result<HostResponse> {
         self.post_for_json(&format!("/hosts/{id}/cert")).await
+    }
+
+    async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse> {
+        self.get("/hosts/dns-config").await
     }
 
     // ── Deployments ──

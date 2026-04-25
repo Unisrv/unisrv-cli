@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use uuid::Uuid;
 
 // ── Environments ──
@@ -318,6 +319,12 @@ pub struct HostResponse {
     pub certificate_valid_until: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsConfigResponse {
+    pub ipv4_addresses: Vec<Ipv4Addr>,
+    pub ipv6_addresses: Vec<Ipv6Addr>,
 }
 
 // ── Deployments ──

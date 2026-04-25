@@ -193,6 +193,9 @@ impl ApiClient for MockApiClient {
     async fn request_host_cert(&self, _: Uuid) -> Result<HostResponse> {
         unimplemented!()
     }
+    async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse> {
+        unimplemented!()
+    }
     async fn create_deployment(
         &self,
         _: Uuid,
