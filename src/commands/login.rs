@@ -35,8 +35,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unisrv_api::test_support::MockApiClient;
     use unisrv_api::ApiError;
+    use unisrv_api::test_support::MockApiClient;
 
     #[tokio::test]
     async fn login_with_provided_credentials() {

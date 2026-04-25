@@ -28,8 +28,8 @@ pub async fn token(client: &dyn ApiClient, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unisrv_api::test_support::MockApiClient;
     use unisrv_api::ApiError;
+    use unisrv_api::test_support::MockApiClient;
 
     #[tokio::test]
     async fn token_returns_access_token() {

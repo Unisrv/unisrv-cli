@@ -29,6 +29,11 @@ enum Commands {
         #[command(subcommand)]
         command: AuthCommands,
     },
+    /// Manage service hosts (domains)
+    Host {
+        #[command(subcommand)]
+        command: HostCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -37,6 +42,22 @@ enum AuthCommands {
     Token {
         /// Output as JSON with expiry information
         #[arg(short, long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HostCommands {
+    /// Claim a host (domain) and provision a TLS certificate
+    Claim {
+        /// Hostname to claim, e.g. example.com
+        hostname: String,
+    },
+    /// List claimed hosts
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
         json: bool,
     },
 }
@@ -62,6 +83,10 @@ async fn main() {
         }
         Commands::Auth { command } => match command {
             AuthCommands::Token { json } => commands::auth::token(client, json).await,
+        },
+        Commands::Host { command } => match command {
+            HostCommands::Claim { hostname } => commands::host::claim(client, &hostname).await,
+            HostCommands::List { json } => commands::host::list(client, json).await,
         },
     };
 
