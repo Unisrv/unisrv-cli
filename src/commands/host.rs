@@ -485,7 +485,10 @@ mod tests {
             "expired.example.com",
             "fresh.example.com",
         ] {
-            assert!(rendered.contains(name), "missing host {name} in:\n{rendered}");
+            assert!(
+                rendered.contains(name),
+                "missing host {name} in:\n{rendered}"
+            );
         }
         assert!(rendered.contains("LE"));
         assert!(rendered.contains("\u{2014}")); // em dash for missing values

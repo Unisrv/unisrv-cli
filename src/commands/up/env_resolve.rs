@@ -14,10 +14,10 @@
 
 use anyhow::{Result, bail};
 use unisrv_api::ApiClient;
-use unisrv_api::models::{CreateEnvironmentRequest, EnvironmentListEntry, EnvironmentResponse};
+use unisrv_api::models::{CreateEnvironmentRequest, EnvironmentListEntry};
 
 use super::defaults::{DEFAULT_ENV_NAME, default_env_display_name};
-use super::plan::EnvAction;
+use super::plan::{EnvAction, ResolvedEnvironment};
 
 /// Abstraction over user prompting for env metadata. Production uses a
 /// dialoguer-backed impl; tests inject scripted answers.
@@ -44,7 +44,7 @@ pub async fn resolve(
 
     if let Some(name) = env_flag {
         if let Some(found) = matching.iter().find(|e| e.name == name) {
-            return Ok(EnvAction::Use(entry_to_response(found)));
+            return Ok(EnvAction::Use(entry_to_resolved(found)));
         }
         // --env named a non-existent env: prompt for the rest.
         let req = prompt_create_env(prompter, project, name)?;
@@ -56,7 +56,7 @@ pub async fn resolve(
             let req = prompt_create_env(prompter, project, DEFAULT_ENV_NAME)?;
             Ok(EnvAction::Create(req))
         }
-        [only] => Ok(EnvAction::Use(entry_to_response(only))),
+        [only] => Ok(EnvAction::Use(entry_to_resolved(only))),
         many => {
             let names: Vec<&str> = many.iter().map(|e| e.name.as_str()).collect();
             bail!(
@@ -84,18 +84,11 @@ fn prompt_create_env(
     })
 }
 
-/// Best-effort projection of a list entry to a full response (we don't get all
-/// fields back from list, but the consumer of `EnvAction::Use` only needs id +
-/// name + project).
-fn entry_to_response(entry: &EnvironmentListEntry) -> EnvironmentResponse {
-    EnvironmentResponse {
+fn entry_to_resolved(entry: &EnvironmentListEntry) -> ResolvedEnvironment {
+    ResolvedEnvironment {
         id: entry.id,
-        project: entry.project.clone(),
         name: entry.name.clone(),
-        display_name: entry.display_name.clone(),
-        description: entry.description.clone(),
-        created_at: entry.created_at,
-        updated_at: entry.created_at,
+        project: entry.project.clone(),
     }
 }
 
@@ -117,9 +110,7 @@ mod tests {
     impl ScriptedPrompter {
         fn new(strings: Vec<&str>, optionals: Vec<Option<&str>>) -> Self {
             Self {
-                strings: RefCell::new(
-                    strings.into_iter().rev().map(String::from).collect(),
-                ),
+                strings: RefCell::new(strings.into_iter().rev().map(String::from).collect()),
                 optionals: RefCell::new(
                     optionals
                         .into_iter()
@@ -141,7 +132,11 @@ mod tests {
             }
         }
         fn prompt_optional(&self, _prompt: &str) -> Result<Option<String>> {
-            Ok(self.optionals.borrow_mut().pop().expect("no scripted optional"))
+            Ok(self
+                .optionals
+                .borrow_mut()
+                .pop()
+                .expect("no scripted optional"))
         }
     }
 
@@ -161,9 +156,10 @@ mod tests {
 
     #[tokio::test]
     async fn single_match_returns_use() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![entry("prod", "demo")],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![entry("prod", "demo")],
+            }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
         let action = resolve(&client, "demo", None, &prompter).await.unwrap();
         assert!(matches!(action, EnvAction::Use(e) if e.name == "prod"));
@@ -171,12 +167,15 @@ mod tests {
 
     #[tokio::test]
     async fn no_match_prompts_for_create_with_defaults() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![],
+            }));
         // Empty answers → defaults kick in.
         let prompter = ScriptedPrompter::new(vec!["", ""], vec![None]);
-        let action = resolve(&client, "nginx-demo", None, &prompter).await.unwrap();
+        let action = resolve(&client, "nginx-demo", None, &prompter)
+            .await
+            .unwrap();
         match action {
             EnvAction::Create(req) => {
                 assert_eq!(req.name, "prod");
@@ -190,13 +189,11 @@ mod tests {
 
     #[tokio::test]
     async fn no_match_prompts_for_create_with_user_answers() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![],
-        }));
-        let prompter = ScriptedPrompter::new(
-            vec!["staging", "Staging Env"],
-            vec![Some("for QA")],
-        );
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![],
+            }));
+        let prompter = ScriptedPrompter::new(vec!["staging", "Staging Env"], vec![Some("for QA")]);
         let action = resolve(&client, "demo", None, &prompter).await.unwrap();
         match action {
             EnvAction::Create(req) => {
@@ -210,13 +207,12 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_without_flag_errors() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![entry("prod", "demo"), entry("staging", "demo")],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![entry("prod", "demo"), entry("staging", "demo")],
+            }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
-        let err = resolve(&client, "demo", None, &prompter)
-            .await
-            .unwrap_err();
+        let err = resolve(&client, "demo", None, &prompter).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("--env"), "msg: {msg}");
         assert!(msg.contains("prod"), "msg: {msg}");
@@ -225,9 +221,10 @@ mod tests {
 
     #[tokio::test]
     async fn env_flag_picks_named_env() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![entry("prod", "demo"), entry("staging", "demo")],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![entry("prod", "demo"), entry("staging", "demo")],
+            }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
         let action = resolve(&client, "demo", Some("staging"), &prompter)
             .await
@@ -237,9 +234,10 @@ mod tests {
 
     #[tokio::test]
     async fn env_flag_with_unknown_name_prompts_create() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![entry("prod", "demo")],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![entry("prod", "demo")],
+            }));
         let prompter = ScriptedPrompter::new(vec!["", ""], vec![None]);
         let action = resolve(&client, "demo", Some("staging"), &prompter)
             .await
@@ -252,9 +250,10 @@ mod tests {
 
     #[tokio::test]
     async fn ignores_envs_in_other_projects() {
-        let client = MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
-            environments: vec![entry("prod", "other"), entry("prod", "demo")],
-        }));
+        let client =
+            MockApiClient::logged_in().with_list_environments(Ok(EnvironmentListResponse {
+                environments: vec![entry("prod", "other"), entry("prod", "demo")],
+            }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
         let action = resolve(&client, "demo", None, &prompter).await.unwrap();
         assert!(matches!(action, EnvAction::Use(e) if e.project == "demo"));

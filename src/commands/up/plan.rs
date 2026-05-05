@@ -16,9 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use unisrv_api::models::{
-    CreateEnvironmentRequest, DeploymentConfiguration, EnvironmentResponse, HTTPServiceConfig,
-};
+use unisrv_api::models::{CreateEnvironmentRequest, DeploymentConfiguration, HTTPServiceConfig};
 use uuid::Uuid;
 
 use super::desired::{DesiredDeployment, DesiredService, DesiredState};
@@ -77,9 +75,20 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnvAction {
     /// Environment already exists; just use it.
-    Use(EnvironmentResponse),
+    Use(ResolvedEnvironment),
     /// Environment will be created with these parameters.
     Create(CreateEnvironmentRequest),
+}
+
+/// The minimal info we need about an existing environment to act on it.
+/// Deliberately narrower than the API's `EnvironmentResponse` — only `id`
+/// and `name` are actually consumed downstream, plus `project` to keep tests
+/// honest about which env was selected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedEnvironment {
+    pub id: Uuid,
+    pub name: String,
+    pub project: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,7 +177,8 @@ pub fn diff(desired: &DesiredState, current: &CurrentState, env_action: EnvActio
                 service_actions.push(ServiceAction::Create(desired_svc.clone()));
             }
             Some(current_svc) => {
-                let immutable_diffs = service_immutable_diffs(desired_svc, current_svc);
+                let immutable_diffs =
+                    super::diff::service::immutable_diffs(desired_svc, current_svc);
                 if !immutable_diffs.is_empty() {
                     recreated_services.insert((*name).clone());
                     service_actions.push(ServiceAction::Recreate {
@@ -258,28 +268,11 @@ pub fn diff(desired: &DesiredState, current: &CurrentState, env_action: EnvActio
     }
 }
 
-fn service_immutable_diffs(
-    desired: &DesiredService,
-    current: &CurrentService,
-) -> Vec<RecreateReason> {
-    let mut out = Vec::new();
-    if desired.host != current.host {
-        out.push(RecreateReason::ImmutableField {
-            field: "host",
-            old: current.host.clone(),
-            new: desired.host.clone(),
-        });
-    }
-    if desired.region != current.region {
-        out.push(RecreateReason::ImmutableField {
-            field: "region",
-            old: current.region.clone(),
-            new: desired.region.clone(),
-        });
-    }
-    out
-}
-
+/// Compares user *intent* (name + target_group) only — never `service_id`.
+/// Desired has no id at diff time; that resolution happens at apply time
+/// against the live `service_ids` map. When a service is recreated and its
+/// id changes, the deployment is forced onto the recreate path separately
+/// via [`RecreateReason::DependentServiceRecreated`], not via this function.
 fn service_bindings_match(
     desired: Option<&super::desired::DesiredServiceBinding>,
     current: Option<&CurrentServiceBinding>,
@@ -302,25 +295,16 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDateTime;
     use unisrv_api::models::{
         DeploymentConfiguration, HTTPLocation, HTTPLocationTarget, HTTPServiceConfig,
     };
 
-    fn dummy_env() -> EnvironmentResponse {
-        EnvironmentResponse {
-            id: Uuid::new_v4(),
-            project: "demo".into(),
-            name: "prod".into(),
-            display_name: None,
-            description: None,
-            created_at: NaiveDateTime::default(),
-            updated_at: NaiveDateTime::default(),
-        }
-    }
-
     fn use_env() -> EnvAction {
-        EnvAction::Use(dummy_env())
+        EnvAction::Use(ResolvedEnvironment {
+            id: Uuid::new_v4(),
+            name: "prod".into(),
+            project: "demo".into(),
+        })
     }
 
     fn http_config() -> HTTPServiceConfig {
@@ -469,8 +453,17 @@ mod tests {
     #[test]
     fn config_change_only_is_service_update() {
         let mut desired = desired_with_service("web", "h.example");
-        desired.services.get_mut("web").unwrap().configuration.allow_http = true;
-        let plan = diff(&desired, &current_with_service("web", "h.example"), use_env());
+        desired
+            .services
+            .get_mut("web")
+            .unwrap()
+            .configuration
+            .allow_http = true;
+        let plan = diff(
+            &desired,
+            &current_with_service("web", "h.example"),
+            use_env(),
+        );
         assert!(matches!(
             plan.service_actions.as_slice(),
             [ServiceAction::Update { .. }]

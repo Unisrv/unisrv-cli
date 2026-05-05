@@ -69,7 +69,8 @@ pub struct MockApiClient {
     pub list_services_response: ResponseSlot<ServiceListResponse>,
     pub get_service_responses: Mutex<Vec<std::result::Result<ServiceDetailResponse, ApiError>>>,
     pub list_deployments_response: ResponseSlot<DeploymentListResponse>,
-    pub get_deployment_responses: Mutex<Vec<std::result::Result<DeploymentDetailResponse, ApiError>>>,
+    pub get_deployment_responses:
+        Mutex<Vec<std::result::Result<DeploymentDetailResponse, ApiError>>>,
     pub provision_service_response: ResponseSlot<ServiceProvisionResponse>,
     pub create_deployment_response: ResponseSlot<CreateDeploymentResponse>,
     pub update_service_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
@@ -141,10 +142,7 @@ impl MockApiClient {
     }
 
     /// Configure the response that the next `request_host_cert` call will return.
-    pub fn with_request_host_cert(
-        self,
-        resp: std::result::Result<HostResponse, ApiError>,
-    ) -> Self {
+    pub fn with_request_host_cert(self, resp: std::result::Result<HostResponse, ApiError>) -> Self {
         self.request_host_cert_response.set(resp);
         self
     }
@@ -273,12 +271,18 @@ impl ApiClient for MockApiClient {
         &self,
         req: CreateEnvironmentRequest,
     ) -> Result<EnvironmentResponse> {
-        self.calls.lock().unwrap().create_environment_calls.push(req);
-        self.create_environment_response.take("create_environment_response")
+        self.calls
+            .lock()
+            .unwrap()
+            .create_environment_calls
+            .push(req);
+        self.create_environment_response
+            .take("create_environment_response")
     }
     async fn list_environments(&self) -> Result<EnvironmentListResponse> {
         self.calls.lock().unwrap().list_environments_calls += 1;
-        self.list_environments_response.take("list_environments_response")
+        self.list_environments_response
+            .take("list_environments_response")
     }
     async fn update_environment(
         &self,
@@ -350,7 +354,8 @@ impl ApiClient for MockApiClient {
             .unwrap()
             .provision_service_calls
             .push((env_id, req));
-        self.provision_service_response.take("provision_service_response")
+        self.provision_service_response
+            .take("provision_service_response")
     }
     async fn list_services(&self, env_id: Uuid) -> Result<ServiceListResponse> {
         self.calls.lock().unwrap().list_services_calls.push(env_id);
@@ -438,11 +443,17 @@ impl ApiClient for MockApiClient {
             .unwrap()
             .create_deployment_calls
             .push((env_id, req));
-        self.create_deployment_response.take("create_deployment_response")
+        self.create_deployment_response
+            .take("create_deployment_response")
     }
     async fn list_deployments(&self, env_id: Uuid) -> Result<DeploymentListResponse> {
-        self.calls.lock().unwrap().list_deployments_calls.push(env_id);
-        self.list_deployments_response.take("list_deployments_response")
+        self.calls
+            .lock()
+            .unwrap()
+            .list_deployments_calls
+            .push(env_id);
+        self.list_deployments_response
+            .take("list_deployments_response")
     }
     async fn get_deployment(
         &self,

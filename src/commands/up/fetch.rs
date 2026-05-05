@@ -31,10 +31,8 @@ pub async fn fetch_current_state(
     let mut services: BTreeMap<String, CurrentService> = BTreeMap::new();
     for entry in services_list.services {
         let detail = client.get_service(env_id, entry.id).await?;
-        let configuration: HTTPServiceConfig =
-            serde_json::from_value(detail.configuration.clone()).with_context(|| {
-                format!("failed to parse configuration for service {}", entry.name)
-            })?;
+        let configuration: HTTPServiceConfig = serde_json::from_value(detail.configuration.clone())
+            .with_context(|| format!("failed to parse configuration for service {}", entry.name))?;
         let host = host_by_service
             .get(&entry.id)
             .map(|h| h.host.clone())
@@ -165,7 +163,9 @@ mod tests {
         let env = Uuid::new_v4();
         let client = MockApiClient::logged_in()
             .with_list_services(Ok(ServiceListResponse { services: vec![] }))
-            .with_list_deployments(Ok(DeploymentListResponse { deployments: vec![] }));
+            .with_list_deployments(Ok(DeploymentListResponse {
+                deployments: vec![],
+            }));
         let state = fetch_current_state(&client, env, &[]).await.unwrap();
         assert!(state.services.is_empty());
         assert!(state.deployments.is_empty());
@@ -183,7 +183,9 @@ mod tests {
                 }],
             }))
             .push_get_service(Ok(service_detail(svc_id, env, "web")))
-            .with_list_deployments(Ok(DeploymentListResponse { deployments: vec![] }));
+            .with_list_deployments(Ok(DeploymentListResponse {
+                deployments: vec![],
+            }));
         let hosts = vec![host("web.example", svc_id)];
         let state = fetch_current_state(&client, env, &hosts).await.unwrap();
         let svc = &state.services["web"];
@@ -220,7 +222,12 @@ mod tests {
                     created_at: NaiveDateTime::default(),
                 }],
             }))
-            .push_get_deployment(Ok(deployment_detail(dep_id, "web", Some(svc_id), Some("default"))));
+            .push_get_deployment(Ok(deployment_detail(
+                dep_id,
+                "web",
+                Some(svc_id),
+                Some("default"),
+            )));
         let state = fetch_current_state(&client, env, &[]).await.unwrap();
         let dep = &state.deployments["web"];
         let binding = dep.service_binding.as_ref().unwrap();

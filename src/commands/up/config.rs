@@ -78,9 +78,7 @@ impl UpConfig {
                     );
                 }
                 if dep.port.is_none() {
-                    bail!(
-                        "deployment \"{name}\" binds to service \"{svc}\" but has no `port` set"
-                    );
+                    bail!("deployment \"{name}\" binds to service \"{svc}\" but has no `port` set");
                 }
             }
         }
@@ -110,10 +108,7 @@ fn validate_blocks(body: &hcl::Body) -> Result<()> {
                 labels.iter().map(|s| s.to_string()).collect(),
             );
             if !seen.insert(key) {
-                bail!(
-                    "duplicate `{kind} \"{}\"` block",
-                    labels.join("\" \"")
-                );
+                bail!("duplicate `{kind} \"{}\"` block", labels.join("\" \""));
             }
         }
 
@@ -176,9 +171,7 @@ deployment "app" {
         let dep = &cfg.deployment["app"];
         assert_eq!(
             dep.container.args.as_ref().map(|v| v.as_slice()),
-            Some(
-                [String::from("--config"), String::from("/etc/app.conf")].as_slice(),
-            ),
+            Some([String::from("--config"), String::from("/etc/app.conf")].as_slice(),),
         );
         let env = dep.container.env.as_ref().unwrap();
         assert_eq!(env["LOG_LEVEL"], "info");

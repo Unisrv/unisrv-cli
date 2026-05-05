@@ -11,11 +11,7 @@ use super::desired::DesiredState;
 
 #[allow(dead_code)]
 pub async fn validate_hosts(client: &dyn ApiClient, desired: &DesiredState) -> Result<()> {
-    let referenced: BTreeSet<&str> = desired
-        .services
-        .values()
-        .map(|s| s.host.as_str())
-        .collect();
+    let referenced: BTreeSet<&str> = desired.services.values().map(|s| s.host.as_str()).collect();
     if referenced.is_empty() {
         return Ok(());
     }
@@ -23,17 +19,12 @@ pub async fn validate_hosts(client: &dyn ApiClient, desired: &DesiredState) -> R
     validate_hosts_against(&referenced, &claimed)
 }
 
-pub fn validate_hosts_against(
-    referenced: &BTreeSet<&str>,
-    claimed: &[HostResponse],
-) -> Result<()> {
+pub fn validate_hosts_against(referenced: &BTreeSet<&str>, claimed: &[HostResponse]) -> Result<()> {
     if referenced.is_empty() {
         return Ok(());
     }
-    let by_host: std::collections::BTreeMap<&str, &HostResponse> = claimed
-        .iter()
-        .map(|h| (h.host.as_str(), h))
-        .collect();
+    let by_host: std::collections::BTreeMap<&str, &HostResponse> =
+        claimed.iter().map(|h| (h.host.as_str(), h)).collect();
     let now = Utc::now().naive_utc();
     let mut problems: Vec<String> = Vec::new();
     for host in referenced {
@@ -105,7 +96,11 @@ mod tests {
             host: host.to_string(),
             user_id: Uuid::new_v4(),
             service_id: None,
-            certificate_type: if valid { Some("letsencrypt".into()) } else { None },
+            certificate_type: if valid {
+                Some("letsencrypt".into())
+            } else {
+                None
+            },
             certificate_valid_until: valid_until,
             created_at: NaiveDateTime::default(),
             updated_at: NaiveDateTime::default(),
@@ -114,8 +109,8 @@ mod tests {
 
     #[tokio::test]
     async fn passes_when_all_hosts_claimed_with_certs() {
-        let client = MockApiClient::logged_in()
-            .with_list_hosts(Ok(vec![host_with_cert("a.example", true)]));
+        let client =
+            MockApiClient::logged_in().with_list_hosts(Ok(vec![host_with_cert("a.example", true)]));
         let desired = desired_with_hosts(&["a.example"]);
         validate_hosts(&client, &desired).await.unwrap();
     }

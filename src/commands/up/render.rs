@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use console::Style;
-use unisrv_api::models::{DeploymentConfiguration, HTTPServiceConfig};
 
+use super::diff;
 use super::plan::{DeploymentAction, EnvAction, Plan, RecreateReason, ServiceAction};
 
 pub struct PlanStyles {
@@ -39,7 +39,11 @@ impl PlanStyles {
 
 pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Plan for project {}:", styles.bold.apply_to(&plan.project));
+    let _ = writeln!(
+        out,
+        "Plan for project {}:",
+        styles.bold.apply_to(&plan.project)
+    );
     let _ = writeln!(out);
 
     // Counters for summary.
@@ -92,7 +96,9 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                 let _ = writeln!(out, "      host:   {}", s.host);
                 let _ = writeln!(out, "      region: {}", s.region);
             }
-            ServiceAction::Update { desired, current, .. } => {
+            ServiceAction::Update {
+                desired, current, ..
+            } => {
                 to_change += 1;
                 let _ = writeln!(
                     out,
@@ -100,22 +106,36 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     styles.change.apply_to("~"),
                     styles.bold.apply_to(&desired.name)
                 );
-                render_service_config_diff(&mut out, &current.configuration, &desired.configuration);
+                diff::service::render_config_diff(
+                    &mut out,
+                    &current.configuration,
+                    &desired.configuration,
+                );
             }
-            ServiceAction::Recreate { current, desired, reasons } => {
+            ServiceAction::Recreate {
+                current,
+                desired,
+                reasons,
+            } => {
                 to_recreate += 1;
                 let _ = writeln!(
                     out,
                     "  {} service {} {}",
                     styles.destroy.apply_to("-/+"),
                     styles.bold.apply_to(&desired.name),
-                    styles.dim.apply_to(format!("(recreate — {})", format_reasons(reasons)))
+                    styles
+                        .dim
+                        .apply_to(format!("(recreate — {})", format_reasons(reasons)))
                 );
                 if current.host != desired.host {
                     let _ = writeln!(out, "      host:   {} -> {}", current.host, desired.host);
                 }
                 if current.region != desired.region {
-                    let _ = writeln!(out, "      region: {} -> {}", current.region, desired.region);
+                    let _ = writeln!(
+                        out,
+                        "      region: {} -> {}",
+                        current.region, desired.region
+                    );
                 }
             }
             ServiceAction::Delete(s) => {
@@ -149,10 +169,16 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     let _ = writeln!(out, "      port:     {p}");
                 }
                 if let Some(b) = &d.service_binding {
-                    let _ = writeln!(out, "      service:  {} (group={})", b.service_name, b.target_group);
+                    let _ = writeln!(
+                        out,
+                        "      service:  {} (group={})",
+                        b.service_name, b.target_group
+                    );
                 }
             }
-            DeploymentAction::Update { desired, current, .. } => {
+            DeploymentAction::Update {
+                desired, current, ..
+            } => {
                 to_change += 1;
                 let _ = writeln!(
                     out,
@@ -160,22 +186,33 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     styles.change.apply_to("~"),
                     styles.bold.apply_to(&desired.name)
                 );
-                render_deployment_config_diff(&mut out, &current.configuration, &desired.configuration);
+                diff::deployment::render_config_diff(
+                    &mut out,
+                    &current.configuration,
+                    &desired.configuration,
+                );
             }
-            DeploymentAction::Recreate { current, desired, reasons } => {
+            DeploymentAction::Recreate {
+                current,
+                desired,
+                reasons,
+            } => {
                 to_recreate += 1;
                 let _ = writeln!(
                     out,
                     "  {} deployment {} {}",
                     styles.destroy.apply_to("-/+"),
                     styles.bold.apply_to(&desired.name),
-                    styles.dim.apply_to(format!("(recreate — {})", format_reasons(reasons)))
+                    styles
+                        .dim
+                        .apply_to(format!("(recreate — {})", format_reasons(reasons)))
                 );
                 if current.configuration.container_image != desired.configuration.container_image {
                     let _ = writeln!(
                         out,
                         "      image: {} -> {}",
-                        current.configuration.container_image, desired.configuration.container_image
+                        current.configuration.container_image,
+                        desired.configuration.container_image
                     );
                 }
             }
@@ -186,7 +223,9 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     "  {} deployment {} {}",
                     styles.destroy.apply_to("-"),
                     styles.bold.apply_to(&d.name),
-                    styles.dim.apply_to(format!("(image: {})", d.configuration.container_image))
+                    styles
+                        .dim
+                        .apply_to(format!("(image: {})", d.configuration.container_image))
                 );
             }
         }
@@ -203,67 +242,6 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
     );
 
     out
-}
-
-fn render_service_config_diff(
-    out: &mut String,
-    current: &HTTPServiceConfig,
-    desired: &HTTPServiceConfig,
-) {
-    if current.allow_http != desired.allow_http {
-        let _ = writeln!(
-            out,
-            "      allow_http: {} -> {}",
-            current.allow_http, desired.allow_http
-        );
-    }
-    if current.locations != desired.locations {
-        let _ = writeln!(out, "      locations:  (changed)");
-    }
-}
-
-fn render_deployment_config_diff(
-    out: &mut String,
-    current: &DeploymentConfiguration,
-    desired: &DeploymentConfiguration,
-) {
-    if current.container_image != desired.container_image {
-        let _ = writeln!(
-            out,
-            "      image:    {} -> {}",
-            current.container_image, desired.container_image
-        );
-    }
-    if current.replicas != desired.replicas {
-        let _ = writeln!(out, "      replicas: {} -> {}", current.replicas, desired.replicas);
-    }
-    if current.region != desired.region {
-        let _ = writeln!(out, "      region:   {} -> {}", current.region, desired.region);
-    }
-    if current.instance_port != desired.instance_port {
-        let _ = writeln!(
-            out,
-            "      port:     {:?} -> {:?}",
-            current.instance_port, desired.instance_port
-        );
-    }
-    if current.args != desired.args {
-        let _ = writeln!(out, "      args:     (changed)");
-    }
-    if current.env != desired.env {
-        let _ = writeln!(out, "      env:      (changed)");
-    }
-    if current.vcpu_count != desired.vcpu_count
-        || current.vcpu_ratio != desired.vcpu_ratio
-        || current.memory_mb != desired.memory_mb
-    {
-        let _ = writeln!(
-            out,
-            "      resources: {}vcpu @ {} / {}MB -> {}vcpu @ {} / {}MB",
-            current.vcpu_count, current.vcpu_ratio, current.memory_mb,
-            desired.vcpu_count, desired.vcpu_ratio, desired.memory_mb,
-        );
-    }
 }
 
 fn format_reasons(reasons: &[RecreateReason]) -> String {
@@ -360,14 +338,10 @@ mod tests {
     fn renders_recreate_with_reason() {
         let plan = Plan {
             project: "demo".into(),
-            env_action: EnvAction::Use(unisrv_api::models::EnvironmentResponse {
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
-                project: "demo".into(),
                 name: "prod".into(),
-                display_name: None,
-                description: None,
-                created_at: chrono::NaiveDateTime::default(),
-                updated_at: chrono::NaiveDateTime::default(),
+                project: "demo".into(),
             }),
             service_actions: vec![ServiceAction::Recreate {
                 current: CurrentService {
@@ -403,14 +377,10 @@ mod tests {
     fn renders_delete_summary() {
         let plan = Plan {
             project: "demo".into(),
-            env_action: EnvAction::Use(unisrv_api::models::EnvironmentResponse {
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
-                project: "demo".into(),
                 name: "prod".into(),
-                display_name: None,
-                description: None,
-                created_at: chrono::NaiveDateTime::default(),
-                updated_at: chrono::NaiveDateTime::default(),
+                project: "demo".into(),
             }),
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Delete(
@@ -443,14 +413,10 @@ mod tests {
 
         let plan = Plan {
             project: "demo".into(),
-            env_action: EnvAction::Use(unisrv_api::models::EnvironmentResponse {
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
-                project: "demo".into(),
                 name: "prod".into(),
-                display_name: None,
-                description: None,
-                created_at: chrono::NaiveDateTime::default(),
-                updated_at: chrono::NaiveDateTime::default(),
+                project: "demo".into(),
             }),
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Update {

@@ -22,16 +22,19 @@ use unisrv_api::models::{
 use uuid::Uuid;
 
 use super::desired::{DesiredDeployment, DesiredService, DesiredServiceBinding};
-use super::plan::{DeploymentAction, EnvAction, Plan, ServiceAction};
+use super::plan::{
+    CurrentDeployment, CurrentService, DeploymentAction, EnvAction, Plan, ServiceAction,
+};
 
 pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     // ── Phase 1: env ──
     let env_id = match plan.env_action {
         EnvAction::Use(env) => env.id,
         EnvAction::Create(req) => {
-            let env = client.create_environment(req.clone()).await.with_context(|| {
-                format!("failed to create environment {:?}", req.name)
-            })?;
+            let env = client
+                .create_environment(req.clone())
+                .await
+                .with_context(|| format!("failed to create environment {:?}", req.name))?;
             println!("  + environment {} created", env.name);
             env.id
         }
@@ -40,45 +43,18 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     // service_ids: name → id, mutated as services are created/recreated.
     let mut service_ids: BTreeMap<String, Uuid> = plan.existing_service_ids.clone();
 
-    // Partition service actions by phase.
-    let (mut creates, mut updates, mut recreates, mut deletes): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for action in plan.service_actions {
-        match action {
-            ServiceAction::Create(d) => creates.push(d),
-            ServiceAction::Update { id, desired, .. } => updates.push((id, desired)),
-            ServiceAction::Recreate { current, desired, .. } => recreates.push((current, desired)),
-            ServiceAction::Delete(c) => deletes.push(c),
-        }
-    }
-
-    // Partition deployment actions.
-    let (mut dep_creates, mut dep_updates, mut dep_recreates, mut dep_deletes): (
-        Vec<_>,
-        Vec<_>,
-        Vec<_>,
-        Vec<_>,
-    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for action in plan.deployment_actions {
-        match action {
-            DeploymentAction::Create(d) => dep_creates.push(d),
-            DeploymentAction::Update { id, desired, .. } => dep_updates.push((id, desired)),
-            DeploymentAction::Recreate { current, desired, .. } => {
-                dep_recreates.push((current, desired))
-            }
-            DeploymentAction::Delete(c) => dep_deletes.push(c),
-        }
-    }
+    let services = PartitionedServices::from_actions(plan.service_actions);
+    let mut deployments = PartitionedDeployments::from_actions(plan.deployment_actions);
 
     // ── Phase 2: create new services ──
-    for desired in creates {
+    for desired in services.creates {
         let id = create_service(client, env_id, &desired).await?;
         service_ids.insert(desired.name.clone(), id);
         println!("  + service {} created", desired.name);
     }
 
     // ── Phase 3: update services ──
-    for (id, desired) in updates {
+    for (id, desired) in services.updates {
         client
             .update_service(env_id, id, desired.configuration.clone())
             .await
@@ -87,12 +63,7 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     // ── Phase 4: delete deployments being removed or recreated ──
-    let to_delete_deps: Vec<_> = dep_deletes
-        .iter()
-        .map(|d| (d.id, d.name.clone()))
-        .chain(dep_recreates.iter().map(|(c, _)| (c.id, c.name.clone())))
-        .collect();
-    for (id, name) in to_delete_deps {
+    for (id, name) in deployments.ids_to_delete() {
         client
             .delete_deployment(env_id, id)
             .await
@@ -101,7 +72,7 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     // ── Phase 5: recreate services (delete then create) ──
-    for (current, desired) in recreates {
+    for (current, desired) in services.recreates {
         client
             .delete_service(env_id, current.id)
             .await
@@ -112,17 +83,13 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     // ── Phase 6: create deployments (new + recreated) ──
-    let to_create_deps: Vec<DesiredDeployment> = dep_creates
-        .into_iter()
-        .chain(dep_recreates.into_iter().map(|(_c, d)| d))
-        .collect();
-    for desired in to_create_deps {
+    for desired in deployments.drain_for_create() {
         create_deployment(client, env_id, &desired, &service_ids).await?;
         println!("  + deployment {} created", desired.name);
     }
 
     // ── Phase 7: update deployments ──
-    for (id, desired) in dep_updates {
+    for (id, desired) in deployments.updates {
         client
             .update_deployment(
                 env_id,
@@ -137,7 +104,7 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     // ── Phase 8: delete services being removed ──
-    for current in deletes {
+    for current in services.deletes {
         client
             .delete_service(env_id, current.id)
             .await
@@ -146,6 +113,85 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Service actions grouped by lifecycle phase.
+///
+/// Field order mirrors apply order so a top-to-bottom read of the struct
+/// matches the runbook in `apply()`.
+#[derive(Default)]
+struct PartitionedServices {
+    creates: Vec<DesiredService>,
+    updates: Vec<(Uuid, DesiredService)>,
+    recreates: Vec<(CurrentService, DesiredService)>,
+    deletes: Vec<CurrentService>,
+}
+
+impl PartitionedServices {
+    fn from_actions(actions: Vec<ServiceAction>) -> Self {
+        let mut p = Self::default();
+        for action in actions {
+            match action {
+                ServiceAction::Create(d) => p.creates.push(d),
+                ServiceAction::Update { id, desired, .. } => p.updates.push((id, desired)),
+                ServiceAction::Recreate {
+                    current, desired, ..
+                } => p.recreates.push((current, desired)),
+                ServiceAction::Delete(c) => p.deletes.push(c),
+            }
+        }
+        p
+    }
+}
+
+/// Deployment actions grouped by lifecycle phase.
+#[derive(Default)]
+struct PartitionedDeployments {
+    creates: Vec<DesiredDeployment>,
+    updates: Vec<(Uuid, DesiredDeployment)>,
+    recreates: Vec<(CurrentDeployment, DesiredDeployment)>,
+    deletes: Vec<CurrentDeployment>,
+}
+
+impl PartitionedDeployments {
+    fn from_actions(actions: Vec<DeploymentAction>) -> Self {
+        let mut p = Self::default();
+        for action in actions {
+            match action {
+                DeploymentAction::Create(d) => p.creates.push(d),
+                DeploymentAction::Update { id, desired, .. } => p.updates.push((id, desired)),
+                DeploymentAction::Recreate {
+                    current, desired, ..
+                } => p.recreates.push((current, desired)),
+                DeploymentAction::Delete(c) => p.deletes.push(c),
+            }
+        }
+        p
+    }
+
+    /// Phase 4 victims: explicit deletes plus the *current* half of each
+    /// recreate (recreate = delete-then-create, the delete uses the old id).
+    fn ids_to_delete(&self) -> Vec<(Uuid, String)> {
+        self.deletes
+            .iter()
+            .map(|d| (d.id, d.name.clone()))
+            .chain(self.recreates.iter().map(|(c, _)| (c.id, c.name.clone())))
+            .collect()
+    }
+
+    /// Phase 6 work: explicit creates plus the *desired* half of each recreate.
+    /// Drains the relevant fields, leaving `updates` and `deletes` intact for
+    /// later phases.
+    fn drain_for_create(&mut self) -> Vec<DesiredDeployment> {
+        std::mem::take(&mut self.creates)
+            .into_iter()
+            .chain(
+                std::mem::take(&mut self.recreates)
+                    .into_iter()
+                    .map(|(_, d)| d),
+            )
+            .collect()
+    }
 }
 
 async fn create_service(
@@ -193,12 +239,15 @@ fn resolve_binding(
     binding: &DesiredServiceBinding,
     service_ids: &BTreeMap<String, Uuid>,
 ) -> Result<DeploymentServiceBinding> {
-    let id = service_ids.get(&binding.service_name).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "internal: service {:?} not found in id map (missing or not yet created)",
-            binding.service_name
-        )
-    })?;
+    let id = service_ids
+        .get(&binding.service_name)
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal: service {:?} not found in id map (missing or not yet created)",
+                binding.service_name
+            )
+        })?;
     Ok(DeploymentServiceBinding {
         service_id: id,
         target_group: binding.target_group.clone(),
@@ -218,6 +267,8 @@ mod tests {
         HTTPLocationTarget, HTTPServiceConfig, ServiceProvisionResponse,
     };
     use unisrv_api::test_support::MockApiClient;
+
+    use crate::commands::up::plan::ResolvedEnvironment;
 
     fn http_config() -> HTTPServiceConfig {
         HTTPServiceConfig {
@@ -248,14 +299,10 @@ mod tests {
     }
 
     fn use_env() -> EnvAction {
-        EnvAction::Use(EnvironmentResponse {
+        EnvAction::Use(ResolvedEnvironment {
             id: Uuid::new_v4(),
-            project: "demo".into(),
             name: "prod".into(),
-            display_name: None,
-            description: None,
-            created_at: NaiveDateTime::default(),
-            updated_at: NaiveDateTime::default(),
+            project: "demo".into(),
         })
     }
 
