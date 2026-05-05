@@ -20,6 +20,18 @@ pub struct CallLog {
     pub get_hosts_dns_config_calls: u32,
     pub request_host_cert_calls: Vec<Uuid>,
     pub list_hosts_calls: u32,
+    pub list_environments_calls: u32,
+    pub create_environment_calls: Vec<CreateEnvironmentRequest>,
+    pub list_services_calls: Vec<Uuid>,
+    pub get_service_calls: Vec<(Uuid, Uuid)>,
+    pub list_deployments_calls: Vec<Uuid>,
+    pub get_deployment_calls: Vec<(Uuid, Uuid)>,
+    pub provision_service_calls: Vec<(Uuid, ServiceProvisionRequest)>,
+    pub create_deployment_calls: Vec<(Uuid, CreateDeploymentRequest)>,
+    pub update_service_calls: Vec<(Uuid, Uuid, HTTPServiceConfig)>,
+    pub update_deployment_calls: Vec<(Uuid, Uuid, UpdateDeploymentRequest)>,
+    pub delete_service_calls: Vec<(Uuid, Uuid)>,
+    pub delete_deployment_calls: Vec<(Uuid, Uuid)>,
 }
 
 /// One-shot response slot for a mocked endpoint. Configure with `set`, consume with `take`.
@@ -52,6 +64,18 @@ pub struct MockApiClient {
     pub dns_config_response: ResponseSlot<DnsConfigResponse>,
     pub request_host_cert_response: ResponseSlot<HostResponse>,
     pub list_hosts_response: ResponseSlot<Vec<HostResponse>>,
+    pub list_environments_response: ResponseSlot<EnvironmentListResponse>,
+    pub create_environment_response: ResponseSlot<EnvironmentResponse>,
+    pub list_services_response: ResponseSlot<ServiceListResponse>,
+    pub get_service_responses: Mutex<Vec<std::result::Result<ServiceDetailResponse, ApiError>>>,
+    pub list_deployments_response: ResponseSlot<DeploymentListResponse>,
+    pub get_deployment_responses: Mutex<Vec<std::result::Result<DeploymentDetailResponse, ApiError>>>,
+    pub provision_service_response: ResponseSlot<ServiceProvisionResponse>,
+    pub create_deployment_response: ResponseSlot<CreateDeploymentResponse>,
+    pub update_service_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
+    pub update_deployment_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
+    pub delete_service_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
+    pub delete_deployment_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
     pub calls: Mutex<CallLog>,
 }
 
@@ -64,6 +88,18 @@ impl Default for MockApiClient {
             dns_config_response: ResponseSlot::default(),
             request_host_cert_response: ResponseSlot::default(),
             list_hosts_response: ResponseSlot::default(),
+            list_environments_response: ResponseSlot::default(),
+            create_environment_response: ResponseSlot::default(),
+            list_services_response: ResponseSlot::default(),
+            get_service_responses: Mutex::new(Vec::new()),
+            list_deployments_response: ResponseSlot::default(),
+            get_deployment_responses: Mutex::new(Vec::new()),
+            provision_service_response: ResponseSlot::default(),
+            create_deployment_response: ResponseSlot::default(),
+            update_service_responses: Mutex::new(Vec::new()),
+            update_deployment_responses: Mutex::new(Vec::new()),
+            delete_service_responses: Mutex::new(Vec::new()),
+            delete_deployment_responses: Mutex::new(Vec::new()),
             calls: Mutex::new(CallLog::default()),
         }
     }
@@ -119,6 +155,90 @@ impl MockApiClient {
         self
     }
 
+    pub fn with_list_environments(
+        self,
+        resp: std::result::Result<EnvironmentListResponse, ApiError>,
+    ) -> Self {
+        self.list_environments_response.set(resp);
+        self
+    }
+
+    pub fn with_create_environment(
+        self,
+        resp: std::result::Result<EnvironmentResponse, ApiError>,
+    ) -> Self {
+        self.create_environment_response.set(resp);
+        self
+    }
+
+    pub fn with_list_services(
+        self,
+        resp: std::result::Result<ServiceListResponse, ApiError>,
+    ) -> Self {
+        self.list_services_response.set(resp);
+        self
+    }
+
+    pub fn push_get_service(
+        self,
+        resp: std::result::Result<ServiceDetailResponse, ApiError>,
+    ) -> Self {
+        self.get_service_responses.lock().unwrap().push(resp);
+        self
+    }
+
+    pub fn with_list_deployments(
+        self,
+        resp: std::result::Result<DeploymentListResponse, ApiError>,
+    ) -> Self {
+        self.list_deployments_response.set(resp);
+        self
+    }
+
+    pub fn push_get_deployment(
+        self,
+        resp: std::result::Result<DeploymentDetailResponse, ApiError>,
+    ) -> Self {
+        self.get_deployment_responses.lock().unwrap().push(resp);
+        self
+    }
+
+    pub fn with_provision_service(
+        self,
+        resp: std::result::Result<ServiceProvisionResponse, ApiError>,
+    ) -> Self {
+        self.provision_service_response.set(resp);
+        self
+    }
+
+    pub fn with_create_deployment(
+        self,
+        resp: std::result::Result<CreateDeploymentResponse, ApiError>,
+    ) -> Self {
+        self.create_deployment_response.set(resp);
+        self
+    }
+
+    pub fn push_update_service(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.update_service_responses.lock().unwrap().push(resp);
+        self
+    }
+
+    pub fn push_update_deployment(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.update_deployment_responses.lock().unwrap().push(resp);
+        self
+    }
+
+    pub fn push_delete_service(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.delete_service_responses.lock().unwrap().push(resp);
+        self
+    }
+
+    pub fn push_delete_deployment(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.delete_deployment_responses.lock().unwrap().push(resp);
+        self
+    }
+
     fn require_session(&self) -> Result<AuthSession> {
         self.session
             .lock()
@@ -149,11 +269,16 @@ impl ApiClient for MockApiClient {
         self.require_session()
     }
 
-    async fn create_environment(&self, _: CreateEnvironmentRequest) -> Result<EnvironmentResponse> {
-        unimplemented!()
+    async fn create_environment(
+        &self,
+        req: CreateEnvironmentRequest,
+    ) -> Result<EnvironmentResponse> {
+        self.calls.lock().unwrap().create_environment_calls.push(req);
+        self.create_environment_response.take("create_environment_response")
     }
     async fn list_environments(&self) -> Result<EnvironmentListResponse> {
-        unimplemented!()
+        self.calls.lock().unwrap().list_environments_calls += 1;
+        self.list_environments_response.take("list_environments_response")
     }
     async fn update_environment(
         &self,
@@ -217,22 +342,60 @@ impl ApiClient for MockApiClient {
     }
     async fn provision_service(
         &self,
-        _: Uuid,
-        _: ServiceProvisionRequest,
+        env_id: Uuid,
+        req: ServiceProvisionRequest,
     ) -> Result<ServiceProvisionResponse> {
-        unimplemented!()
+        self.calls
+            .lock()
+            .unwrap()
+            .provision_service_calls
+            .push((env_id, req));
+        self.provision_service_response.take("provision_service_response")
     }
-    async fn list_services(&self, _: Uuid) -> Result<ServiceListResponse> {
-        unimplemented!()
+    async fn list_services(&self, env_id: Uuid) -> Result<ServiceListResponse> {
+        self.calls.lock().unwrap().list_services_calls.push(env_id);
+        self.list_services_response.take("list_services_response")
     }
-    async fn get_service(&self, _: Uuid, _: Uuid) -> Result<ServiceDetailResponse> {
-        unimplemented!()
+    async fn get_service(&self, env_id: Uuid, service_id: Uuid) -> Result<ServiceDetailResponse> {
+        self.calls
+            .lock()
+            .unwrap()
+            .get_service_calls
+            .push((env_id, service_id));
+        self.get_service_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| panic!("get_service_response not configured"))
     }
-    async fn update_service(&self, _: Uuid, _: Uuid, _: HTTPServiceConfig) -> Result<()> {
-        unimplemented!()
+    async fn update_service(
+        &self,
+        env_id: Uuid,
+        service_id: Uuid,
+        req: HTTPServiceConfig,
+    ) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .update_service_calls
+            .push((env_id, service_id, req));
+        self.update_service_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Ok(()))
     }
-    async fn delete_service(&self, _: Uuid, _: Uuid) -> Result<()> {
-        unimplemented!()
+    async fn delete_service(&self, env_id: Uuid, service_id: Uuid) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .delete_service_calls
+            .push((env_id, service_id));
+        self.delete_service_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Ok(()))
     }
     async fn create_service_target(
         &self,
@@ -267,21 +430,63 @@ impl ApiClient for MockApiClient {
     }
     async fn create_deployment(
         &self,
-        _: Uuid,
-        _: CreateDeploymentRequest,
+        env_id: Uuid,
+        req: CreateDeploymentRequest,
     ) -> Result<CreateDeploymentResponse> {
-        unimplemented!()
+        self.calls
+            .lock()
+            .unwrap()
+            .create_deployment_calls
+            .push((env_id, req));
+        self.create_deployment_response.take("create_deployment_response")
     }
-    async fn list_deployments(&self, _: Uuid) -> Result<DeploymentListResponse> {
-        unimplemented!()
+    async fn list_deployments(&self, env_id: Uuid) -> Result<DeploymentListResponse> {
+        self.calls.lock().unwrap().list_deployments_calls.push(env_id);
+        self.list_deployments_response.take("list_deployments_response")
     }
-    async fn get_deployment(&self, _: Uuid, _: Uuid) -> Result<DeploymentDetailResponse> {
-        unimplemented!()
+    async fn get_deployment(
+        &self,
+        env_id: Uuid,
+        deployment_id: Uuid,
+    ) -> Result<DeploymentDetailResponse> {
+        self.calls
+            .lock()
+            .unwrap()
+            .get_deployment_calls
+            .push((env_id, deployment_id));
+        self.get_deployment_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| panic!("get_deployment_response not configured"))
     }
-    async fn update_deployment(&self, _: Uuid, _: Uuid, _: UpdateDeploymentRequest) -> Result<()> {
-        unimplemented!()
+    async fn update_deployment(
+        &self,
+        env_id: Uuid,
+        deployment_id: Uuid,
+        req: UpdateDeploymentRequest,
+    ) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .update_deployment_calls
+            .push((env_id, deployment_id, req));
+        self.update_deployment_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Ok(()))
     }
-    async fn delete_deployment(&self, _: Uuid, _: Uuid) -> Result<()> {
-        unimplemented!()
+    async fn delete_deployment(&self, env_id: Uuid, deployment_id: Uuid) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .delete_deployment_calls
+            .push((env_id, deployment_id));
+        self.delete_deployment_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Ok(()))
     }
 }

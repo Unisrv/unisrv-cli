@@ -7,5 +7,7 @@ service "nginx" {
 deployment "nginx" {
   service = "nginx"
   port    = 80
-  image   = "nginx:latest"
+  container {
+    image = "nginx:latest"
+  }
 }

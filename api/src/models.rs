@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 // ── Environments ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateEnvironmentRequest {
     pub project: String,
     pub name: String,
@@ -16,7 +16,7 @@ pub struct CreateEnvironmentRequest {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateEnvironmentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -28,7 +28,7 @@ pub struct UpdateEnvironmentRequest {
     pub description: Option<Option<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentResponse {
     pub id: Uuid,
     pub project: String,
@@ -39,7 +39,7 @@ pub struct EnvironmentResponse {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentListEntry {
     pub id: Uuid,
     pub project: String,
@@ -52,14 +52,14 @@ pub struct EnvironmentListEntry {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentListResponse {
     pub environments: Vec<EnvironmentListEntry>,
 }
 
 // ── Instances ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceConfiguration {
     pub container_image: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,13 +68,13 @@ pub struct InstanceConfiguration {
     pub env: Option<BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceNetworkConfig {
     pub network_id: Uuid,
     pub instance_ip: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceProvisionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -89,21 +89,21 @@ pub struct InstanceProvisionRequest {
     pub network: Option<InstanceNetworkConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceProvisionResponse {
     pub id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceDeprovisionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceState(pub String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceListEntry {
     pub id: Uuid,
     pub name: Option<String>,
@@ -112,12 +112,12 @@ pub struct InstanceListEntry {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceListResponse {
     pub instances: Vec<InstanceListEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceTargetInfo {
     pub id: Uuid,
     pub service_id: Uuid,
@@ -125,7 +125,7 @@ pub struct ServiceTargetInfo {
     pub instance_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProxiedPortInfo {
     pub id: Uuid,
     pub port: u16,
@@ -133,7 +133,7 @@ pub struct ProxiedPortInfo {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceDetailResponse {
     pub id: Uuid,
     pub name: Option<String>,
@@ -150,7 +150,7 @@ pub struct InstanceDetailResponse {
     pub proxied_ports: Option<Vec<ProxiedPortInfo>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogMessage {
     pub log_type: String,
     pub timestamp_ms: u64,
@@ -158,12 +158,12 @@ pub struct LogMessage {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateInstanceTCPProxyRequest {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateInstanceTCPProxyResponse {
     pub id: Uuid,
     pub external_address: String,
@@ -171,13 +171,13 @@ pub struct CreateInstanceTCPProxyResponse {
 
 // ── Networks ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateInternalNetworkRequest {
     pub name: String,
     pub ipv4_cidr: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkListItem {
     pub id: Uuid,
     pub name: String,
@@ -185,18 +185,18 @@ pub struct NetworkListItem {
     pub instance_count: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkListResponse {
     pub networks: Vec<NetworkListItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceInfo {
     pub id: Uuid,
     pub internal_ip: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkResponse {
     pub id: Uuid,
     pub name: String,
@@ -207,14 +207,14 @@ pub struct NetworkResponse {
 
 // ── Services ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HTTPLocationTarget {
     Instance { group: String },
     Url { url: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HTTPLocation {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,20 +222,20 @@ pub struct HTTPLocation {
     pub target: HTTPLocationTarget,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HTTPServiceConfig {
     pub locations: Vec<HTTPLocation>,
     pub allow_http: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceInstanceTarget {
     pub instance_id: Uuid,
     pub instance_port: u16,
     pub group: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceProvisionRequest {
     pub region: String,
     pub name: String,
@@ -244,24 +244,24 @@ pub struct ServiceProvisionRequest {
     pub instance_targets: Vec<ServiceInstanceTarget>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceProvisionResponse {
     pub service_id: Uuid,
     pub connection_string: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceListItem {
     pub id: Uuid,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceListResponse {
     pub services: Vec<ServiceListItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceProviderDetail {
     pub id: Uuid,
     pub node_id: Uuid,
@@ -269,7 +269,7 @@ pub struct ServiceProviderDetail {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceTargetDetail {
     pub id: Uuid,
     pub instance_id: Uuid,
@@ -278,13 +278,13 @@ pub struct ServiceTargetDetail {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceStatistics {
     pub incoming_bytes: u64,
     pub outgoing_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceDetailResponse {
     pub id: Uuid,
     pub name: String,
@@ -297,19 +297,19 @@ pub struct ServiceDetailResponse {
     pub statistics: Option<ServiceStatistics>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateTargetResponse {
     pub target_id: Uuid,
 }
 
 // ── Service Hosts ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaimHostRequest {
     pub host: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostResponse {
     pub id: Uuid,
     pub host: String,
@@ -321,7 +321,7 @@ pub struct HostResponse {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DnsConfigResponse {
     pub ipv4_addresses: Vec<Ipv4Addr>,
     pub ipv6_addresses: Vec<Ipv6Addr>,
@@ -329,7 +329,7 @@ pub struct DnsConfigResponse {
 
 // ── Deployments ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentConfiguration {
     pub replicas: u32,
     pub region: String,
@@ -347,13 +347,13 @@ pub struct DeploymentConfiguration {
     pub instance_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentServiceBinding {
     pub service_id: Uuid,
     pub target_group: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -361,20 +361,20 @@ pub struct CreateDeploymentRequest {
     pub configuration: DeploymentConfiguration,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateDeploymentRequest {
     pub configuration: DeploymentConfiguration,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateDeploymentResponse {
     pub id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentState(pub String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentListEntry {
     pub id: Uuid,
     pub name: String,
@@ -384,12 +384,12 @@ pub struct DeploymentListEntry {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentListResponse {
     pub deployments: Vec<DeploymentListEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentInstanceEntry {
     pub id: Uuid,
     pub name: Option<String>,
@@ -398,7 +398,7 @@ pub struct DeploymentInstanceEntry {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentDetailResponse {
     pub id: Uuid,
     pub name: String,

@@ -34,6 +34,12 @@ enum Commands {
         #[command(subcommand)]
         command: HostCommands,
     },
+    /// Apply the unisrv.hcl in the current directory
+    Up {
+        /// Pin which environment to target by name (overrides project lookup)
+        #[arg(long)]
+        env: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +94,7 @@ async fn main() {
             HostCommands::Claim { hostname } => commands::host::claim(client, &hostname).await,
             HostCommands::List { json } => commands::host::list(client, json).await,
         },
+        Commands::Up { env } => commands::up::run(client, env.as_deref()).await,
     };
 
     if let Err(err) = result {
