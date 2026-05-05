@@ -653,4 +653,278 @@ mod tests {
             other => panic!("expected Recreate, got {other:?}"),
         }
     }
+
+    #[test]
+    fn missing_deployment_is_create() {
+        let mut desired = DesiredState {
+            project: "demo".into(),
+            services: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+        };
+        desired.deployments.insert(
+            "worker".into(),
+            DesiredDeployment {
+                name: "worker".into(),
+                configuration: dep_config("worker:1"),
+                service_binding: None,
+            },
+        );
+        let plan = diff(&desired, &CurrentState::empty(), use_env());
+        assert!(plan.service_actions.is_empty());
+        assert!(matches!(
+            plan.deployment_actions.as_slice(),
+            [DeploymentAction::Create(d)] if d.name == "worker"
+        ));
+    }
+
+    #[test]
+    fn extra_deployment_is_delete() {
+        let desired = DesiredState {
+            project: "demo".into(),
+            services: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+        };
+        let mut current = CurrentState::empty();
+        current.deployments.insert(
+            "old-worker".into(),
+            CurrentDeployment {
+                id: Uuid::new_v4(),
+                name: "old-worker".into(),
+                configuration: dep_config("old:1"),
+                service_binding: None,
+            },
+        );
+        let plan = diff(&desired, &current, use_env());
+        assert!(matches!(
+            plan.deployment_actions.as_slice(),
+            [DeploymentAction::Delete(d)] if d.name == "old-worker"
+        ));
+    }
+
+    #[test]
+    fn region_change_is_service_recreate() {
+        let mut desired = desired_with_service("web", "h.example");
+        desired.services.get_mut("web").unwrap().region = "us-east".into();
+        let plan = diff(
+            &desired,
+            &current_with_service("web", "h.example"),
+            use_env(),
+        );
+        match &plan.service_actions[0] {
+            ServiceAction::Recreate { reasons, .. } => {
+                assert!(
+                    reasons.iter().any(|r| matches!(
+                        r,
+                        RecreateReason::ImmutableField {
+                            field: "region",
+                            ..
+                        }
+                    )),
+                    "reasons: {reasons:?}"
+                );
+            }
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+    }
+
+    /// One diff that produces every variant of `ServiceAction` and
+    /// `DeploymentAction` simultaneously, to catch interactions between
+    /// action paths that isolated tests miss.
+    #[test]
+    fn kitchen_sink_yields_full_action_taxonomy() {
+        use super::super::desired::DesiredServiceBinding;
+
+        // Service ids that exist on the "server" side. New ids (Create / the
+        // post-Recreate id) come from the apply layer, not here.
+        let stable_id = Uuid::new_v4();
+        let update_id = Uuid::new_v4();
+        let recreate_id = Uuid::new_v4();
+        let delete_id = Uuid::new_v4();
+        let update_dep_id = Uuid::new_v4();
+        let recreate_dep_id = Uuid::new_v4();
+        let delete_dep_id = Uuid::new_v4();
+
+        // ── Desired: stable (no diff) + create + update + recreate ──
+        let mut desired = DesiredState {
+            project: "demo".into(),
+            services: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+        };
+        let mut updated_cfg = http_config();
+        updated_cfg.allow_http = true; // forces a config-only diff vs. current
+
+        for (name, host, cfg) in [
+            ("stable-svc", "stable.example", http_config()),
+            ("create-svc", "create.example", http_config()),
+            ("update-svc", "update.example", updated_cfg.clone()),
+            ("recreate-svc", "new-recreate.example", http_config()),
+        ] {
+            desired.services.insert(
+                name.into(),
+                DesiredService {
+                    name: name.into(),
+                    host: host.into(),
+                    region: "dev".into(),
+                    configuration: cfg,
+                },
+            );
+        }
+
+        // create-dep: new (binds to the new create-svc).
+        // update-dep: image bump, binding unchanged on stable-svc.
+        // recreate-dep: binding flips from stable-svc to create-svc.
+        desired.deployments.insert(
+            "create-dep".into(),
+            DesiredDeployment {
+                name: "create-dep".into(),
+                configuration: dep_config("nginx:new"),
+                service_binding: Some(DesiredServiceBinding {
+                    service_name: "create-svc".into(),
+                    target_group: "default".into(),
+                }),
+            },
+        );
+        desired.deployments.insert(
+            "update-dep".into(),
+            DesiredDeployment {
+                name: "update-dep".into(),
+                configuration: dep_config("nginx:2"),
+                service_binding: Some(DesiredServiceBinding {
+                    service_name: "stable-svc".into(),
+                    target_group: "default".into(),
+                }),
+            },
+        );
+        desired.deployments.insert(
+            "recreate-dep".into(),
+            DesiredDeployment {
+                name: "recreate-dep".into(),
+                configuration: dep_config("nginx:1"),
+                service_binding: Some(DesiredServiceBinding {
+                    service_name: "create-svc".into(),
+                    target_group: "default".into(),
+                }),
+            },
+        );
+
+        // ── Current: stable + update + recreate (with old host) + delete ──
+        let mut current = CurrentState::empty();
+        for (name, id, host) in [
+            ("stable-svc", stable_id, "stable.example"),
+            ("update-svc", update_id, "update.example"),
+            ("recreate-svc", recreate_id, "old-recreate.example"), // host differs
+            ("delete-svc", delete_id, "delete.example"),
+        ] {
+            current.services.insert(
+                name.into(),
+                CurrentService {
+                    id,
+                    name: name.into(),
+                    host: host.into(),
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+            );
+        }
+
+        current.deployments.insert(
+            "update-dep".into(),
+            CurrentDeployment {
+                id: update_dep_id,
+                name: "update-dep".into(),
+                configuration: dep_config("nginx:1"),
+                service_binding: Some(CurrentServiceBinding {
+                    service_id: stable_id,
+                    service_name: "stable-svc".into(),
+                    target_group: "default".into(),
+                }),
+            },
+        );
+        current.deployments.insert(
+            "recreate-dep".into(),
+            CurrentDeployment {
+                id: recreate_dep_id,
+                name: "recreate-dep".into(),
+                configuration: dep_config("nginx:1"),
+                service_binding: Some(CurrentServiceBinding {
+                    service_id: stable_id,
+                    service_name: "stable-svc".into(),
+                    target_group: "default".into(),
+                }),
+            },
+        );
+        current.deployments.insert(
+            "delete-dep".into(),
+            CurrentDeployment {
+                id: delete_dep_id,
+                name: "delete-dep".into(),
+                configuration: dep_config("delete:1"),
+                service_binding: None,
+            },
+        );
+
+        let plan = diff(&desired, &current, use_env());
+
+        // Every variant of ServiceAction is represented exactly once.
+        let svc_by_name: BTreeMap<&str, &ServiceAction> =
+            plan.service_actions.iter().map(|a| (a.name(), a)).collect();
+        assert_eq!(svc_by_name.len(), 4, "{:?}", plan.service_actions);
+        assert!(matches!(
+            svc_by_name["create-svc"],
+            ServiceAction::Create(_)
+        ));
+        assert!(matches!(
+            svc_by_name["update-svc"],
+            ServiceAction::Update { .. }
+        ));
+        assert!(matches!(
+            svc_by_name["recreate-svc"],
+            ServiceAction::Recreate { .. }
+        ));
+        assert!(matches!(
+            svc_by_name["delete-svc"],
+            ServiceAction::Delete(_)
+        ));
+
+        // stable-svc has no diff — must not appear as an action.
+        assert!(!svc_by_name.contains_key("stable-svc"));
+
+        // Every variant of DeploymentAction is represented exactly once.
+        let dep_by_name: BTreeMap<&str, &DeploymentAction> = plan
+            .deployment_actions
+            .iter()
+            .map(|a| (a.name(), a))
+            .collect();
+        assert_eq!(dep_by_name.len(), 4, "{:?}", plan.deployment_actions);
+        assert!(matches!(
+            dep_by_name["create-dep"],
+            DeploymentAction::Create(_)
+        ));
+        assert!(matches!(
+            dep_by_name["update-dep"],
+            DeploymentAction::Update { .. }
+        ));
+        match dep_by_name["recreate-dep"] {
+            DeploymentAction::Recreate { reasons, .. } => assert!(
+                reasons.contains(&RecreateReason::ServiceBindingChanged),
+                "expected ServiceBindingChanged in {reasons:?}",
+            ),
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+        assert!(matches!(
+            dep_by_name["delete-dep"],
+            DeploymentAction::Delete(_)
+        ));
+
+        // existing_service_ids snapshots every current service so apply can
+        // resolve bindings for unchanged services.
+        assert_eq!(
+            plan.existing_service_ids.get("stable-svc"),
+            Some(&stable_id)
+        );
+        assert_eq!(
+            plan.existing_service_ids.get("recreate-svc"),
+            Some(&recreate_id)
+        );
+    }
 }

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::Duration;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -13,6 +14,10 @@ use crate::models::*;
 /// Records which methods were called and with what arguments.
 #[derive(Default)]
 pub struct CallLog {
+    /// Method names in the order they were invoked. Use this to assert
+    /// cross-method ordering (e.g. that all `delete_deployment` calls
+    /// preceded any `delete_service` call).
+    pub call_order: Vec<&'static str>,
     pub login_calls: Vec<(String, String)>,
     pub access_token_calls: u32,
     pub auth_session_calls: u32,
@@ -67,16 +72,19 @@ pub struct MockApiClient {
     pub list_environments_response: ResponseSlot<EnvironmentListResponse>,
     pub create_environment_response: ResponseSlot<EnvironmentResponse>,
     pub list_services_response: ResponseSlot<ServiceListResponse>,
-    pub get_service_responses: Mutex<Vec<std::result::Result<ServiceDetailResponse, ApiError>>>,
+    pub get_service_responses:
+        Mutex<VecDeque<std::result::Result<ServiceDetailResponse, ApiError>>>,
     pub list_deployments_response: ResponseSlot<DeploymentListResponse>,
     pub get_deployment_responses:
-        Mutex<Vec<std::result::Result<DeploymentDetailResponse, ApiError>>>,
-    pub provision_service_response: ResponseSlot<ServiceProvisionResponse>,
-    pub create_deployment_response: ResponseSlot<CreateDeploymentResponse>,
-    pub update_service_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
-    pub update_deployment_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
-    pub delete_service_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
-    pub delete_deployment_responses: Mutex<Vec<std::result::Result<(), ApiError>>>,
+        Mutex<VecDeque<std::result::Result<DeploymentDetailResponse, ApiError>>>,
+    pub provision_service_responses:
+        Mutex<VecDeque<std::result::Result<ServiceProvisionResponse, ApiError>>>,
+    pub create_deployment_responses:
+        Mutex<VecDeque<std::result::Result<CreateDeploymentResponse, ApiError>>>,
+    pub update_service_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub update_deployment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub delete_service_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub delete_deployment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub calls: Mutex<CallLog>,
 }
 
@@ -92,15 +100,15 @@ impl Default for MockApiClient {
             list_environments_response: ResponseSlot::default(),
             create_environment_response: ResponseSlot::default(),
             list_services_response: ResponseSlot::default(),
-            get_service_responses: Mutex::new(Vec::new()),
+            get_service_responses: Mutex::new(VecDeque::new()),
             list_deployments_response: ResponseSlot::default(),
-            get_deployment_responses: Mutex::new(Vec::new()),
-            provision_service_response: ResponseSlot::default(),
-            create_deployment_response: ResponseSlot::default(),
-            update_service_responses: Mutex::new(Vec::new()),
-            update_deployment_responses: Mutex::new(Vec::new()),
-            delete_service_responses: Mutex::new(Vec::new()),
-            delete_deployment_responses: Mutex::new(Vec::new()),
+            get_deployment_responses: Mutex::new(VecDeque::new()),
+            provision_service_responses: Mutex::new(VecDeque::new()),
+            create_deployment_responses: Mutex::new(VecDeque::new()),
+            update_service_responses: Mutex::new(VecDeque::new()),
+            update_deployment_responses: Mutex::new(VecDeque::new()),
+            delete_service_responses: Mutex::new(VecDeque::new()),
+            delete_deployment_responses: Mutex::new(VecDeque::new()),
             calls: Mutex::new(CallLog::default()),
         }
     }
@@ -181,7 +189,7 @@ impl MockApiClient {
         self,
         resp: std::result::Result<ServiceDetailResponse, ApiError>,
     ) -> Self {
-        self.get_service_responses.lock().unwrap().push(resp);
+        self.get_service_responses.lock().unwrap().push_back(resp);
         self
     }
 
@@ -197,43 +205,64 @@ impl MockApiClient {
         self,
         resp: std::result::Result<DeploymentDetailResponse, ApiError>,
     ) -> Self {
-        self.get_deployment_responses.lock().unwrap().push(resp);
+        self.get_deployment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
-    pub fn with_provision_service(
+    pub fn push_provision_service(
         self,
         resp: std::result::Result<ServiceProvisionResponse, ApiError>,
     ) -> Self {
-        self.provision_service_response.set(resp);
+        self.provision_service_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
-    pub fn with_create_deployment(
+    pub fn push_create_deployment(
         self,
         resp: std::result::Result<CreateDeploymentResponse, ApiError>,
     ) -> Self {
-        self.create_deployment_response.set(resp);
+        self.create_deployment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
     pub fn push_update_service(self, resp: std::result::Result<(), ApiError>) -> Self {
-        self.update_service_responses.lock().unwrap().push(resp);
+        self.update_service_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
     pub fn push_update_deployment(self, resp: std::result::Result<(), ApiError>) -> Self {
-        self.update_deployment_responses.lock().unwrap().push(resp);
+        self.update_deployment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
     pub fn push_delete_service(self, resp: std::result::Result<(), ApiError>) -> Self {
-        self.delete_service_responses.lock().unwrap().push(resp);
+        self.delete_service_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
     pub fn push_delete_deployment(self, resp: std::result::Result<(), ApiError>) -> Self {
-        self.delete_deployment_responses.lock().unwrap().push(resp);
+        self.delete_deployment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
@@ -249,21 +278,31 @@ impl MockApiClient {
 #[async_trait]
 impl ApiClient for MockApiClient {
     async fn login(&self, username: &str, password: &str) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .login_calls
-            .push((username.to_string(), password.to_string()));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("login");
+            calls
+                .login_calls
+                .push((username.to_string(), password.to_string()));
+        }
         self.login_result.lock().unwrap().take().unwrap_or(Ok(()))
     }
 
     async fn access_token(&self) -> Result<String> {
-        self.calls.lock().unwrap().access_token_calls += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("access_token");
+            calls.access_token_calls += 1;
+        }
         Ok(self.require_session()?.access_token().to_string())
     }
 
     async fn auth_session(&self) -> Result<AuthSession> {
-        self.calls.lock().unwrap().auth_session_calls += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("auth_session");
+            calls.auth_session_calls += 1;
+        }
         self.require_session()
     }
 
@@ -271,16 +310,20 @@ impl ApiClient for MockApiClient {
         &self,
         req: CreateEnvironmentRequest,
     ) -> Result<EnvironmentResponse> {
-        self.calls
-            .lock()
-            .unwrap()
-            .create_environment_calls
-            .push(req);
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("create_environment");
+            calls.create_environment_calls.push(req);
+        }
         self.create_environment_response
             .take("create_environment_response")
     }
     async fn list_environments(&self) -> Result<EnvironmentListResponse> {
-        self.calls.lock().unwrap().list_environments_calls += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_environments");
+            calls.list_environments_calls += 1;
+        }
         self.list_environments_response
             .take("list_environments_response")
     }
@@ -349,28 +392,35 @@ impl ApiClient for MockApiClient {
         env_id: Uuid,
         req: ServiceProvisionRequest,
     ) -> Result<ServiceProvisionResponse> {
-        self.calls
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("provision_service");
+            calls.provision_service_calls.push((env_id, req));
+        }
+        self.provision_service_responses
             .lock()
             .unwrap()
-            .provision_service_calls
-            .push((env_id, req));
-        self.provision_service_response
-            .take("provision_service_response")
+            .pop_front()
+            .unwrap_or_else(|| panic!("provision_service_response not configured"))
     }
     async fn list_services(&self, env_id: Uuid) -> Result<ServiceListResponse> {
-        self.calls.lock().unwrap().list_services_calls.push(env_id);
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_services");
+            calls.list_services_calls.push(env_id);
+        }
         self.list_services_response.take("list_services_response")
     }
     async fn get_service(&self, env_id: Uuid, service_id: Uuid) -> Result<ServiceDetailResponse> {
-        self.calls
-            .lock()
-            .unwrap()
-            .get_service_calls
-            .push((env_id, service_id));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("get_service");
+            calls.get_service_calls.push((env_id, service_id));
+        }
         self.get_service_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or_else(|| panic!("get_service_response not configured"))
     }
     async fn update_service(
@@ -379,27 +429,27 @@ impl ApiClient for MockApiClient {
         service_id: Uuid,
         req: HTTPServiceConfig,
     ) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .update_service_calls
-            .push((env_id, service_id, req));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("update_service");
+            calls.update_service_calls.push((env_id, service_id, req));
+        }
         self.update_service_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or(Ok(()))
     }
     async fn delete_service(&self, env_id: Uuid, service_id: Uuid) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .delete_service_calls
-            .push((env_id, service_id));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("delete_service");
+            calls.delete_service_calls.push((env_id, service_id));
+        }
         self.delete_service_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or(Ok(()))
     }
     async fn create_service_target(
@@ -414,23 +464,39 @@ impl ApiClient for MockApiClient {
         unimplemented!()
     }
     async fn claim_host(&self, req: ClaimHostRequest) -> Result<HostResponse> {
-        self.calls.lock().unwrap().claim_host_calls.push(req);
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("claim_host");
+            calls.claim_host_calls.push(req);
+        }
         self.claim_host_response.take("claim_host_response")
     }
     async fn list_hosts(&self) -> Result<Vec<HostResponse>> {
-        self.calls.lock().unwrap().list_hosts_calls += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_hosts");
+            calls.list_hosts_calls += 1;
+        }
         self.list_hosts_response.take("list_hosts_response")
     }
     async fn delete_host(&self, _: Uuid) -> Result<()> {
         unimplemented!()
     }
     async fn request_host_cert(&self, id: Uuid) -> Result<HostResponse> {
-        self.calls.lock().unwrap().request_host_cert_calls.push(id);
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("request_host_cert");
+            calls.request_host_cert_calls.push(id);
+        }
         self.request_host_cert_response
             .take("request_host_cert_response")
     }
     async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse> {
-        self.calls.lock().unwrap().get_hosts_dns_config_calls += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("get_hosts_dns_config");
+            calls.get_hosts_dns_config_calls += 1;
+        }
         self.dns_config_response.take("dns_config_response")
     }
     async fn create_deployment(
@@ -438,20 +504,23 @@ impl ApiClient for MockApiClient {
         env_id: Uuid,
         req: CreateDeploymentRequest,
     ) -> Result<CreateDeploymentResponse> {
-        self.calls
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("create_deployment");
+            calls.create_deployment_calls.push((env_id, req));
+        }
+        self.create_deployment_responses
             .lock()
             .unwrap()
-            .create_deployment_calls
-            .push((env_id, req));
-        self.create_deployment_response
-            .take("create_deployment_response")
+            .pop_front()
+            .unwrap_or_else(|| panic!("create_deployment_response not configured"))
     }
     async fn list_deployments(&self, env_id: Uuid) -> Result<DeploymentListResponse> {
-        self.calls
-            .lock()
-            .unwrap()
-            .list_deployments_calls
-            .push(env_id);
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_deployments");
+            calls.list_deployments_calls.push(env_id);
+        }
         self.list_deployments_response
             .take("list_deployments_response")
     }
@@ -460,15 +529,15 @@ impl ApiClient for MockApiClient {
         env_id: Uuid,
         deployment_id: Uuid,
     ) -> Result<DeploymentDetailResponse> {
-        self.calls
-            .lock()
-            .unwrap()
-            .get_deployment_calls
-            .push((env_id, deployment_id));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("get_deployment");
+            calls.get_deployment_calls.push((env_id, deployment_id));
+        }
         self.get_deployment_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or_else(|| panic!("get_deployment_response not configured"))
     }
     async fn update_deployment(
@@ -477,27 +546,29 @@ impl ApiClient for MockApiClient {
         deployment_id: Uuid,
         req: UpdateDeploymentRequest,
     ) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .update_deployment_calls
-            .push((env_id, deployment_id, req));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("update_deployment");
+            calls
+                .update_deployment_calls
+                .push((env_id, deployment_id, req));
+        }
         self.update_deployment_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or(Ok(()))
     }
     async fn delete_deployment(&self, env_id: Uuid, deployment_id: Uuid) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .delete_deployment_calls
-            .push((env_id, deployment_id));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("delete_deployment");
+            calls.delete_deployment_calls.push((env_id, deployment_id));
+        }
         self.delete_deployment_responses
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or(Ok(()))
     }
 }

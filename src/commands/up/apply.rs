@@ -321,11 +321,11 @@ mod tests {
                 created_at: NaiveDateTime::default(),
                 updated_at: NaiveDateTime::default(),
             }))
-            .with_provision_service(Ok(ServiceProvisionResponse {
+            .push_provision_service(Ok(ServiceProvisionResponse {
                 service_id: svc_id,
                 connection_string: "n/a".into(),
             }))
-            .with_create_deployment(Ok(CreateDeploymentResponse { id: dep_id }));
+            .push_create_deployment(Ok(CreateDeploymentResponse { id: dep_id }));
 
         let plan = Plan {
             project: "demo".into(),
@@ -436,11 +436,11 @@ mod tests {
         let old_dep_id = Uuid::new_v4();
         let new_dep_id = Uuid::new_v4();
         let client = MockApiClient::logged_in()
-            .with_provision_service(Ok(ServiceProvisionResponse {
+            .push_provision_service(Ok(ServiceProvisionResponse {
                 service_id: new_svc_id,
                 connection_string: "x".into(),
             }))
-            .with_create_deployment(Ok(CreateDeploymentResponse { id: new_dep_id }));
+            .push_create_deployment(Ok(CreateDeploymentResponse { id: new_dep_id }));
 
         let mut existing = BTreeMap::new();
         existing.insert("web".to_string(), old_svc_id);
@@ -548,7 +548,7 @@ mod tests {
     async fn deployment_create_without_binding_works() {
         let dep_id = Uuid::new_v4();
         let client = MockApiClient::logged_in()
-            .with_create_deployment(Ok(CreateDeploymentResponse { id: dep_id }));
+            .push_create_deployment(Ok(CreateDeploymentResponse { id: dep_id }));
 
         let plan = Plan {
             project: "demo".into(),
@@ -567,5 +567,263 @@ mod tests {
         let calls = client.calls.lock().unwrap();
         let (_env, req) = &calls.create_deployment_calls[0];
         assert!(req.service.is_none());
+    }
+
+    /// Drives every variant of `ServiceAction` and `DeploymentAction` through
+    /// `apply()` in a single run. Verifies (a) that each action issues the
+    /// expected API call and (b) the documented phase ordering: creates →
+    /// updates → deployment-deletes → service-recreate → deployment-creates
+    /// → deployment-updates → service-deletes.
+    #[tokio::test]
+    async fn applies_kitchen_sink_in_correct_phase_order() {
+        let stable_svc_id = Uuid::new_v4();
+        let update_svc_id = Uuid::new_v4();
+        let old_recreate_svc_id = Uuid::new_v4();
+        let new_recreate_svc_id = Uuid::new_v4();
+        let new_create_svc_id = Uuid::new_v4();
+        let delete_svc_id = Uuid::new_v4();
+        let update_dep_id = Uuid::new_v4();
+        let old_recreate_dep_id = Uuid::new_v4();
+        let delete_dep_id = Uuid::new_v4();
+        let new_create_dep_id = Uuid::new_v4();
+        let new_recreate_dep_id = Uuid::new_v4();
+
+        // Two provision_service calls: phase 2 for create-svc, phase 5 for
+        // recreate-svc. FIFO order, so push create-svc first.
+        let client = MockApiClient::logged_in()
+            .push_provision_service(Ok(ServiceProvisionResponse {
+                service_id: new_create_svc_id,
+                connection_string: "n/a".into(),
+            }))
+            .push_provision_service(Ok(ServiceProvisionResponse {
+                service_id: new_recreate_svc_id,
+                connection_string: "n/a".into(),
+            }))
+            // Two create_deployment calls in phase 6: create-dep then recreate-dep.
+            .push_create_deployment(Ok(CreateDeploymentResponse {
+                id: new_create_dep_id,
+            }))
+            .push_create_deployment(Ok(CreateDeploymentResponse {
+                id: new_recreate_dep_id,
+            }));
+
+        let mut existing = BTreeMap::new();
+        existing.insert("stable-svc".to_string(), stable_svc_id);
+        existing.insert("update-svc".to_string(), update_svc_id);
+        existing.insert("recreate-svc".to_string(), old_recreate_svc_id);
+        existing.insert("delete-svc".to_string(), delete_svc_id);
+
+        let mut updated_cfg = http_config();
+        updated_cfg.allow_http = true;
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![
+                ServiceAction::Create(DesiredService {
+                    name: "create-svc".into(),
+                    host: "create.example".into(),
+                    region: "dev".into(),
+                    configuration: http_config(),
+                }),
+                ServiceAction::Update {
+                    id: update_svc_id,
+                    desired: DesiredService {
+                        name: "update-svc".into(),
+                        host: "update.example".into(),
+                        region: "dev".into(),
+                        configuration: updated_cfg,
+                    },
+                    current: CurrentService {
+                        id: update_svc_id,
+                        name: "update-svc".into(),
+                        host: "update.example".into(),
+                        region: "dev".into(),
+                        configuration: http_config(),
+                    },
+                },
+                ServiceAction::Recreate {
+                    current: CurrentService {
+                        id: old_recreate_svc_id,
+                        name: "recreate-svc".into(),
+                        host: "old-recreate.example".into(),
+                        region: "dev".into(),
+                        configuration: http_config(),
+                    },
+                    desired: DesiredService {
+                        name: "recreate-svc".into(),
+                        host: "new-recreate.example".into(),
+                        region: "dev".into(),
+                        configuration: http_config(),
+                    },
+                    reasons: vec![RecreateReason::ImmutableField {
+                        field: "host",
+                        old: "old-recreate.example".into(),
+                        new: "new-recreate.example".into(),
+                    }],
+                },
+                ServiceAction::Delete(CurrentService {
+                    id: delete_svc_id,
+                    name: "delete-svc".into(),
+                    host: "delete.example".into(),
+                    region: "dev".into(),
+                    configuration: http_config(),
+                }),
+            ],
+            deployment_actions: vec![
+                DeploymentAction::Create(DesiredDeployment {
+                    name: "create-dep".into(),
+                    configuration: dep_config("nginx:new"),
+                    // Binds to the just-created create-svc to exercise the
+                    // service_ids handoff between phases 2 and 6.
+                    service_binding: Some(DesiredServiceBinding {
+                        service_name: "create-svc".into(),
+                        target_group: "default".into(),
+                    }),
+                }),
+                DeploymentAction::Update {
+                    id: update_dep_id,
+                    desired: DesiredDeployment {
+                        name: "update-dep".into(),
+                        configuration: dep_config("nginx:2"),
+                        service_binding: Some(DesiredServiceBinding {
+                            service_name: "stable-svc".into(),
+                            target_group: "default".into(),
+                        }),
+                    },
+                    current: CurrentDeployment {
+                        id: update_dep_id,
+                        name: "update-dep".into(),
+                        configuration: dep_config("nginx:1"),
+                        service_binding: Some(CurrentServiceBinding {
+                            service_id: stable_svc_id,
+                            service_name: "stable-svc".into(),
+                            target_group: "default".into(),
+                        }),
+                    },
+                },
+                DeploymentAction::Recreate {
+                    current: CurrentDeployment {
+                        id: old_recreate_dep_id,
+                        name: "recreate-dep".into(),
+                        configuration: dep_config("nginx:1"),
+                        service_binding: Some(CurrentServiceBinding {
+                            service_id: stable_svc_id,
+                            service_name: "stable-svc".into(),
+                            target_group: "default".into(),
+                        }),
+                    },
+                    desired: DesiredDeployment {
+                        name: "recreate-dep".into(),
+                        configuration: dep_config("nginx:1"),
+                        service_binding: Some(DesiredServiceBinding {
+                            service_name: "create-svc".into(),
+                            target_group: "default".into(),
+                        }),
+                    },
+                    reasons: vec![RecreateReason::ServiceBindingChanged],
+                },
+                DeploymentAction::Delete(CurrentDeployment {
+                    id: delete_dep_id,
+                    name: "delete-dep".into(),
+                    configuration: dep_config("delete:1"),
+                    service_binding: None,
+                }),
+            ],
+            existing_service_ids: existing,
+        };
+
+        apply(plan, &client).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+
+        // ── Each action ran exactly the expected API calls ──
+        // env was Use, no create_environment.
+        assert_eq!(calls.create_environment_calls.len(), 0);
+        // Two provision calls: create-svc (phase 2) and recreate-svc (phase 5).
+        let provisioned: Vec<&str> = calls
+            .provision_service_calls
+            .iter()
+            .map(|(_, req)| req.name.as_str())
+            .collect();
+        assert_eq!(provisioned, vec!["create-svc", "recreate-svc"]);
+
+        assert_eq!(calls.update_service_calls.len(), 1);
+        assert_eq!(calls.update_service_calls[0].1, update_svc_id);
+
+        // Phase 4 deletes: explicit delete-dep + recreate-dep's old id.
+        let deleted_deps: Vec<Uuid> = calls
+            .delete_deployment_calls
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        assert!(deleted_deps.contains(&delete_dep_id));
+        assert!(deleted_deps.contains(&old_recreate_dep_id));
+        assert_eq!(deleted_deps.len(), 2);
+
+        // Phase 5 + phase 8 service deletes: recreate-svc.old, then delete-svc.
+        let deleted_svcs: Vec<Uuid> = calls
+            .delete_service_calls
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(deleted_svcs, vec![old_recreate_svc_id, delete_svc_id]);
+
+        // Phase 6 deployment creates: create-dep, then recreate-dep.
+        // recreate-dep must bind to the *new* create-svc id, since it was
+        // produced by phase 2.
+        let dep_creates: Vec<(&str, Option<Uuid>)> = calls
+            .create_deployment_calls
+            .iter()
+            .map(|(_, req)| {
+                (
+                    req.name.as_str(),
+                    req.service.as_ref().map(|b| b.service_id),
+                )
+            })
+            .collect();
+        assert_eq!(
+            dep_creates,
+            vec![
+                ("create-dep", Some(new_create_svc_id)),
+                ("recreate-dep", Some(new_create_svc_id)),
+            ]
+        );
+
+        // Phase 7 deployment update.
+        assert_eq!(calls.update_deployment_calls.len(), 1);
+        assert_eq!(calls.update_deployment_calls[0].1, update_dep_id);
+
+        // ── Phase ordering invariants via the global call_order log ──
+        let order = &calls.call_order;
+        let first = |name: &str| {
+            order
+                .iter()
+                .position(|m| *m == name)
+                .unwrap_or_else(|| panic!("{name} not in call_order: {order:?}"))
+        };
+        let last = |name: &str| {
+            order
+                .iter()
+                .rposition(|m| *m == name)
+                .unwrap_or_else(|| panic!("{name} not in call_order: {order:?}"))
+        };
+
+        // 2 → 3: every provision_service before any update_service?
+        // No — phase 2 has only one provision (create-svc), then phase 3
+        // updates, then phase 5 provisions again. So: first provision_service
+        // < update_service < last provision_service. That's the boundary.
+        assert!(first("provision_service") < first("update_service"));
+        assert!(first("update_service") < first("delete_deployment"));
+        // 4 → 5: every delete_deployment before any delete_service.
+        assert!(last("delete_deployment") < first("delete_service"));
+        // 5 internal: recreate-svc deleted before being re-provisioned.
+        assert!(first("delete_service") < last("provision_service"));
+        // 5 → 6: recreate-svc provisioned before any deployment is created.
+        assert!(last("provision_service") < first("create_deployment"));
+        // 6 → 7: every deployment create before any deployment update.
+        assert!(last("create_deployment") < first("update_deployment"));
+        // 7 → 8: deployment update before final service delete (delete-svc).
+        assert!(first("update_deployment") < last("delete_service"));
     }
 }
