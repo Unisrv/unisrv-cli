@@ -4,10 +4,12 @@
 //! interpolation is *not* supported yet — when we add it, the migration path is
 //! to parse to `hcl::Body`, evaluate, then deserialize into these same types.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+use super::parse_error::{ConfigParseError, Locator};
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -49,36 +51,55 @@ pub struct ContainerBlock {
 }
 
 impl UpConfig {
+    #[cfg(test)]
     pub fn parse(source: &str) -> Result<Self> {
+        Self::parse_at(Path::new("unisrv.hcl"), source)
+    }
+
+    pub fn parse_at(path: &Path, source: &str) -> Result<Self> {
         // Parse to a structural Body first so we can catch issues that
         // `hcl-rs`'s serde path silently swallows: duplicate labeled blocks
         // (it merges them into a malformed expression value) and empty labels.
-        let body: hcl::Body = hcl::from_str(source).context("failed to parse unisrv.hcl")?;
-        validate_blocks(&body)?;
-        let cfg: Self = hcl::from_body(body).context("failed to parse unisrv.hcl")?;
-        cfg.validate()?;
+        let body: hcl::Body =
+            hcl::from_str(source).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
+        validate_blocks(path, source, &body)?;
+        let cfg: Self =
+            hcl::from_body(body).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
+        cfg.validate(path, source)?;
         Ok(cfg)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        Self::parse(&source)
+        Self::parse_at(path, &source)
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, path: &Path, source: &str) -> Result<(), ConfigParseError> {
+        let err = |msg, loc| ConfigParseError::validation(path, source, msg, loc);
         if self.project.trim().is_empty() {
-            bail!("`project` must be a non-empty string");
+            return Err(err(
+                "`project` must be a non-empty string".into(),
+                Some(Locator::field("project")),
+            ));
         }
         for (name, dep) in &self.deployment {
             if let Some(svc) = &dep.service {
                 if !self.service.contains_key(svc) {
-                    bail!(
-                        "deployment \"{name}\" references service \"{svc}\" which is not defined"
-                    );
+                    return Err(err(
+                        format!(
+                            "deployment \"{name}\" references service \"{svc}\" which is not defined"
+                        ),
+                        Some(Locator::substring(&format!("\"{svc}\""))),
+                    ));
                 }
                 if dep.port.is_none() {
-                    bail!("deployment \"{name}\" binds to service \"{svc}\" but has no `port` set");
+                    return Err(err(
+                        format!(
+                            "deployment \"{name}\" binds to service \"{svc}\" but has no `port` set"
+                        ),
+                        Some(Locator::substring(&format!("deployment \"{name}\""))),
+                    ));
                 }
             }
         }
@@ -90,29 +111,49 @@ impl UpConfig {
 /// at any nesting depth. `hcl-rs` accepts both, but the deserializer either
 /// silently merges duplicates into a malformed expression value or yields a
 /// blank-keyed entry that survives all the way to API calls.
-fn validate_blocks(body: &hcl::Body) -> Result<()> {
-    let mut seen: BTreeSet<(String, Vec<String>)> = BTreeSet::new();
+fn validate_blocks<'a>(
+    path: &Path,
+    source: &str,
+    body: &'a hcl::Body,
+) -> Result<(), ConfigParseError> {
+    let mut seen: BTreeSet<(&'a str, Vec<&'a str>)> = BTreeSet::new();
+    walk_blocks(path, source, body, &mut seen)
+}
+
+fn walk_blocks<'a>(
+    path: &Path,
+    source: &str,
+    body: &'a hcl::Body,
+    seen: &mut BTreeSet<(&'a str, Vec<&'a str>)>,
+) -> Result<(), ConfigParseError> {
     for block in body.blocks() {
         let kind = block.identifier();
-        let labels: Vec<&str> = block.labels().iter().map(|l| l.as_str()).collect();
+        let labels: Vec<&'a str> = block.labels().iter().map(|l| l.as_str()).collect();
 
         for label in &labels {
             if label.is_empty() {
-                bail!("`{kind}` block has an empty label; labels must be non-empty");
+                return Err(ConfigParseError::validation(
+                    path,
+                    source,
+                    format!("`{kind}` block has an empty label; labels must be non-empty"),
+                    Some(Locator::substring(&format!("{kind} \"\""))),
+                ));
             }
         }
 
-        if !labels.is_empty() {
-            let key = (
-                kind.to_string(),
-                labels.iter().map(|s| s.to_string()).collect(),
-            );
-            if !seen.insert(key) {
-                bail!("duplicate `{kind} \"{}\"` block", labels.join("\" \""));
-            }
+        if !labels.is_empty() && !seen.insert((kind, labels.clone())) {
+            // `seen.insert` returned false → this is the second occurrence,
+            // so point the caret at occurrence index 1.
+            let needle = format!("{kind} \"{}\"", labels.join("\" \""));
+            return Err(ConfigParseError::validation(
+                path,
+                source,
+                format!("duplicate `{kind} \"{}\"` block", labels.join("\" \"")),
+                Some(Locator::substring(&needle).nth(1)),
+            ));
         }
 
-        validate_blocks(block.body())?;
+        walk_blocks(path, source, block.body(), seen)?;
     }
     Ok(())
 }

@@ -1,6 +1,7 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
+use commands::up::parse_error::ConfigParseError;
 use unisrv_api::{ApiClient, ApiError, HttpApiClient};
 
 #[derive(Parser)]
@@ -33,6 +34,12 @@ enum Commands {
     Host {
         #[command(subcommand)]
         command: HostCommands,
+    },
+    /// Manage container registry credentials
+    #[command(alias = "reg")]
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
     },
     /// Apply the unisrv.hcl in the current directory
     Up {
@@ -68,6 +75,59 @@ enum HostCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Add a container registry credential
+    Add {
+        /// Registry hostname, e.g. ghcr.io
+        hostname: String,
+        /// Registry username
+        #[arg(short, long)]
+        username: Option<String>,
+        /// Read password from stdin instead of prompting interactively
+        #[arg(long)]
+        password_stdin: bool,
+        /// Skip validating credentials against the upstream registry
+        #[arg(long)]
+        no_validate: bool,
+    },
+    /// List configured registries
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update credentials for a registry
+    Update {
+        /// Registry hostname
+        hostname: String,
+        /// New username
+        #[arg(short, long)]
+        username: Option<String>,
+        /// Read a new password from stdin
+        #[arg(long)]
+        password_stdin: bool,
+        /// Skip validating credentials against the upstream registry
+        #[arg(long)]
+        no_validate: bool,
+    },
+    /// Delete a registry credential
+    #[command(alias = "rm")]
+    Delete {
+        /// Registry hostname
+        hostname: String,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Test that stored credentials still work against the upstream registry
+    Test {
+        /// Registry hostname
+        hostname: String,
+    },
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     tracing_subscriber::fmt()
@@ -94,14 +154,55 @@ async fn main() {
             HostCommands::Claim { hostname } => commands::host::claim(client, &hostname).await,
             HostCommands::List { json } => commands::host::list(client, json).await,
         },
+        Commands::Registry { command } => match command {
+            RegistryCommands::Add {
+                hostname,
+                username,
+                password_stdin,
+                no_validate,
+            } => {
+                commands::registry::add(
+                    client,
+                    &hostname,
+                    username.as_deref(),
+                    password_stdin,
+                    !no_validate,
+                )
+                .await
+            }
+            RegistryCommands::List { json } => commands::registry::list(client, json).await,
+            RegistryCommands::Update {
+                hostname,
+                username,
+                password_stdin,
+                no_validate,
+            } => {
+                commands::registry::update(
+                    client,
+                    &hostname,
+                    username.as_deref(),
+                    password_stdin,
+                    !no_validate,
+                )
+                .await
+            }
+            RegistryCommands::Delete { hostname, yes } => {
+                commands::registry::delete(client, &hostname, yes).await
+            }
+            RegistryCommands::Test { hostname } => commands::registry::test(client, &hostname).await,
+        },
         Commands::Up { env } => commands::up::run(client, env.as_deref()).await,
     };
 
     if let Err(err) = result {
-        match err.downcast_ref::<ApiError>() {
-            Some(ApiError::AuthRequired(msg)) => eprintln!("Error: {msg}"),
-            Some(ApiError::Server { status, reason }) => eprintln!("Error ({status}): {reason}"),
-            _ => eprintln!("Error: {err}"),
+        if let Some(parse_err) = err.downcast_ref::<ConfigParseError>() {
+            eprint!("{parse_err}");
+        } else if let Some(ApiError::AuthRequired(msg)) = err.downcast_ref::<ApiError>() {
+            eprintln!("Error: {msg}");
+        } else if let Some(ApiError::Server { status, reason }) = err.downcast_ref::<ApiError>() {
+            eprintln!("Error ({status}): {reason}");
+        } else {
+            eprintln!("Error: {err:#}");
         }
         std::process::exit(1);
     }

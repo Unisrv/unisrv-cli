@@ -411,3 +411,61 @@ pub struct DeploymentDetailResponse {
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
+
+// ── Container Registries ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryKind {
+    Userpass,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserpassConfig {
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserpassSecret {
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRegistryRequest {
+    pub hostname: String,
+    pub kind: RegistryKind,
+    pub config: serde_json::Value,
+    pub secret: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateRegistryRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegistryResponse {
+    pub id: Uuid,
+    pub hostname: String,
+    pub kind: RegistryKind,
+    pub config: serde_json::Value,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegistryListResponse {
+    pub registries: Vec<RegistryResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestRegistryResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}

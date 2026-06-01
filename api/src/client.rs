@@ -116,6 +116,22 @@ pub trait ApiClient: Send + Sync {
         req: UpdateDeploymentRequest,
     ) -> Result<()>;
     async fn delete_deployment(&self, env_id: Uuid, deployment_id: Uuid) -> Result<()>;
+
+    // ── Container Registries ──
+    async fn create_registry(
+        &self,
+        req: CreateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse>;
+    async fn list_registries(&self) -> Result<RegistryListResponse>;
+    async fn update_registry(
+        &self,
+        id: Uuid,
+        req: UpdateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse>;
+    async fn delete_registry(&self, id: Uuid) -> Result<()>;
+    async fn test_registry(&self, id: Uuid) -> Result<TestRegistryResponse>;
 }
 
 pub struct HttpApiClient {
@@ -542,5 +558,46 @@ impl ApiClient for HttpApiClient {
     async fn delete_deployment(&self, env_id: Uuid, deployment_id: Uuid) -> Result<()> {
         self.delete_req(&format!("/environment/{env_id}/deployment/{deployment_id}"))
             .await
+    }
+
+    // ── Container Registries ──
+
+    async fn create_registry(
+        &self,
+        req: CreateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse> {
+        let path = registries_path_with_validate("/registries", validate);
+        self.post(&path, &req).await
+    }
+
+    async fn list_registries(&self) -> Result<RegistryListResponse> {
+        self.get("/registries").await
+    }
+
+    async fn update_registry(
+        &self,
+        id: Uuid,
+        req: UpdateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse> {
+        let path = registries_path_with_validate(&format!("/registries/{id}"), validate);
+        self.put(&path, &req).await
+    }
+
+    async fn delete_registry(&self, id: Uuid) -> Result<()> {
+        self.delete_req(&format!("/registries/{id}")).await
+    }
+
+    async fn test_registry(&self, id: Uuid) -> Result<TestRegistryResponse> {
+        self.post_for_json(&format!("/registries/{id}/test")).await
+    }
+}
+
+fn registries_path_with_validate(base: &str, validate: bool) -> String {
+    if validate {
+        format!("{base}?validate=true")
+    } else {
+        base.to_string()
     }
 }

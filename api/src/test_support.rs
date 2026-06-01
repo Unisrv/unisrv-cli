@@ -37,6 +37,11 @@ pub struct CallLog {
     pub update_deployment_calls: Vec<(Uuid, Uuid, UpdateDeploymentRequest)>,
     pub delete_service_calls: Vec<(Uuid, Uuid)>,
     pub delete_deployment_calls: Vec<(Uuid, Uuid)>,
+    pub create_registry_calls: Vec<(CreateRegistryRequest, bool)>,
+    pub list_registries_calls: u32,
+    pub update_registry_calls: Vec<(Uuid, UpdateRegistryRequest, bool)>,
+    pub delete_registry_calls: Vec<Uuid>,
+    pub test_registry_calls: Vec<Uuid>,
 }
 
 /// One-shot response slot for a mocked endpoint. Configure with `set`, consume with `take`.
@@ -85,6 +90,11 @@ pub struct MockApiClient {
     pub update_deployment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub delete_service_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub delete_deployment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub create_registry_responses: Mutex<VecDeque<std::result::Result<RegistryResponse, ApiError>>>,
+    pub list_registries_response: ResponseSlot<RegistryListResponse>,
+    pub update_registry_responses: Mutex<VecDeque<std::result::Result<RegistryResponse, ApiError>>>,
+    pub delete_registry_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub test_registry_responses: Mutex<VecDeque<std::result::Result<TestRegistryResponse, ApiError>>>,
     pub calls: Mutex<CallLog>,
 }
 
@@ -109,6 +119,11 @@ impl Default for MockApiClient {
             update_deployment_responses: Mutex::new(VecDeque::new()),
             delete_service_responses: Mutex::new(VecDeque::new()),
             delete_deployment_responses: Mutex::new(VecDeque::new()),
+            create_registry_responses: Mutex::new(VecDeque::new()),
+            list_registries_response: ResponseSlot::default(),
+            update_registry_responses: Mutex::new(VecDeque::new()),
+            delete_registry_responses: Mutex::new(VecDeque::new()),
+            test_registry_responses: Mutex::new(VecDeque::new()),
             calls: Mutex::new(CallLog::default()),
         }
     }
@@ -260,6 +275,55 @@ impl MockApiClient {
 
     pub fn push_delete_deployment(self, resp: std::result::Result<(), ApiError>) -> Self {
         self.delete_deployment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_create_registry(
+        self,
+        resp: std::result::Result<RegistryResponse, ApiError>,
+    ) -> Self {
+        self.create_registry_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn with_list_registries(
+        self,
+        resp: std::result::Result<RegistryListResponse, ApiError>,
+    ) -> Self {
+        self.list_registries_response.set(resp);
+        self
+    }
+
+    pub fn push_update_registry(
+        self,
+        resp: std::result::Result<RegistryResponse, ApiError>,
+    ) -> Self {
+        self.update_registry_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_delete_registry(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.delete_registry_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_test_registry(
+        self,
+        resp: std::result::Result<TestRegistryResponse, ApiError>,
+    ) -> Self {
+        self.test_registry_responses
             .lock()
             .unwrap()
             .push_back(resp);
@@ -570,5 +634,76 @@ impl ApiClient for MockApiClient {
             .unwrap()
             .pop_front()
             .unwrap_or(Ok(()))
+    }
+
+    async fn create_registry(
+        &self,
+        req: CreateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("create_registry");
+            calls.create_registry_calls.push((req, validate));
+        }
+        self.create_registry_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("create_registry_response not configured"))
+    }
+
+    async fn list_registries(&self) -> Result<RegistryListResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_registries");
+            calls.list_registries_calls += 1;
+        }
+        self.list_registries_response
+            .take("list_registries_response")
+    }
+
+    async fn update_registry(
+        &self,
+        id: Uuid,
+        req: UpdateRegistryRequest,
+        validate: bool,
+    ) -> Result<RegistryResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("update_registry");
+            calls.update_registry_calls.push((id, req, validate));
+        }
+        self.update_registry_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("update_registry_response not configured"))
+    }
+
+    async fn delete_registry(&self, id: Uuid) -> Result<()> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("delete_registry");
+            calls.delete_registry_calls.push(id);
+        }
+        self.delete_registry_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    async fn test_registry(&self, id: Uuid) -> Result<TestRegistryResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("test_registry");
+            calls.test_registry_calls.push(id);
+        }
+        self.test_registry_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("test_registry_response not configured"))
     }
 }
