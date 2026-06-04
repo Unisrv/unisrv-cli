@@ -323,7 +323,10 @@ fn looks_like_field_use(source: &str, pos: usize, needle: &str) -> bool {
     // Must be followed (after whitespace) by `=`, `{`, or a label start `"`.
     let tail = &source[after_idx..];
     let trimmed = tail.trim_start_matches([' ', '\t']);
-    matches!(trimmed.as_bytes().first(), Some(b'=') | Some(b'{') | Some(b'"'))
+    matches!(
+        trimmed.as_bytes().first(),
+        Some(b'=') | Some(b'{') | Some(b'"')
+    )
 }
 
 fn is_ident_byte(b: u8) -> bool {
@@ -396,8 +399,7 @@ mod tests {
     fn locator_substring_with_occurrence() {
         let src = "service \"web\" { }\nservice \"web\" { }\n";
         let first = locate(src, &Locator::substring("service \"web\"")).unwrap();
-        let second =
-            locate(src, &Locator::substring("service \"web\"").nth(1)).unwrap();
+        let second = locate(src, &Locator::substring("service \"web\"").nth(1)).unwrap();
         assert_eq!(first.line, 1);
         assert_eq!(second.line, 2);
     }

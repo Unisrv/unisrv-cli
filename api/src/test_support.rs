@@ -94,7 +94,8 @@ pub struct MockApiClient {
     pub list_registries_response: ResponseSlot<RegistryListResponse>,
     pub update_registry_responses: Mutex<VecDeque<std::result::Result<RegistryResponse, ApiError>>>,
     pub delete_registry_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
-    pub test_registry_responses: Mutex<VecDeque<std::result::Result<TestRegistryResponse, ApiError>>>,
+    pub test_registry_responses:
+        Mutex<VecDeque<std::result::Result<TestRegistryResponse, ApiError>>>,
     pub calls: Mutex<CallLog>,
 }
 
@@ -323,10 +324,7 @@ impl MockApiClient {
         self,
         resp: std::result::Result<TestRegistryResponse, ApiError>,
     ) -> Self {
-        self.test_registry_responses
-            .lock()
-            .unwrap()
-            .push_back(resp);
+        self.test_registry_responses.lock().unwrap().push_back(resp);
         self
     }
 

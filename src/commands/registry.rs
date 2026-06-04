@@ -56,9 +56,7 @@ pub async fn update(
     validate: bool,
 ) -> Result<()> {
     if username.is_none() && !password_stdin {
-        bail!(
-            "Specify --username and/or --password-stdin to indicate what to update."
-        );
+        bail!("Specify --username and/or --password-stdin to indicate what to update.");
     }
 
     let id = resolve_registry_id(client, hostname).await?;
@@ -135,9 +133,7 @@ pub async fn list(client: &dyn ApiClient, json: bool) -> Result<()> {
     }
 
     if resp.registries.is_empty() {
-        println!(
-            "No registries configured. Run `unisrv registry add <hostname>` to add one."
-        );
+        println!("No registries configured. Run `unisrv registry add <hostname>` to add one.");
         return Ok(());
     }
 
@@ -211,10 +207,16 @@ fn map_registry_write_error(err: ApiError, hostname: &str) -> anyhow::Error {
         ApiError::Server { status: 409, .. } => anyhow!(
             "A registry for {hostname} already exists. Use `unisrv registry update {hostname}` to change credentials."
         ),
-        ApiError::Server { status: 422, reason } => {
+        ApiError::Server {
+            status: 422,
+            reason,
+        } => {
             anyhow!("Registry rejected credentials: {reason}")
         }
-        ApiError::Server { status: 424, reason } => {
+        ApiError::Server {
+            status: 424,
+            reason,
+        } => {
             anyhow!("Registry unreachable: {reason}. Retry later.")
         }
         other => other.into(),
@@ -419,7 +421,10 @@ mod tests {
 
         let result = test(&mock, "ghcr.io").await;
         assert!(result.is_ok());
-        assert_eq!(mock.calls.lock().unwrap().test_registry_calls, vec![expected_id]);
+        assert_eq!(
+            mock.calls.lock().unwrap().test_registry_calls,
+            vec![expected_id]
+        );
     }
 
     #[tokio::test]
@@ -474,16 +479,14 @@ mod tests {
     fn render_table_includes_columns_and_kind() {
         let now = Utc::now().naive_utc();
         let rendered = render_table(
-            &[
-                RegistryResponse {
-                    id: Uuid::new_v4(),
-                    hostname: "ghcr.io".into(),
-                    kind: RegistryKind::Userpass,
-                    config: serde_json::json!({ "username": "alice" }),
-                    created_at: now - Duration::days(2),
-                    updated_at: now - Duration::hours(3),
-                },
-            ],
+            &[RegistryResponse {
+                id: Uuid::new_v4(),
+                hostname: "ghcr.io".into(),
+                kind: RegistryKind::Userpass,
+                config: serde_json::json!({ "username": "alice" }),
+                created_at: now - Duration::days(2),
+                updated_at: now - Duration::hours(3),
+            }],
             now,
         );
 

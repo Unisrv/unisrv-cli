@@ -189,7 +189,9 @@ async fn main() {
             RegistryCommands::Delete { hostname, yes } => {
                 commands::registry::delete(client, &hostname, yes).await
             }
-            RegistryCommands::Test { hostname } => commands::registry::test(client, &hostname).await,
+            RegistryCommands::Test { hostname } => {
+                commands::registry::test(client, &hostname).await
+            }
         },
         Commands::Up { env } => commands::up::run(client, env.as_deref()).await,
     };

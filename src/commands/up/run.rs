@@ -4,7 +4,6 @@
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input};
-use std::collections::BTreeSet;
 use std::path::Path;
 use unisrv_api::ApiClient;
 
@@ -14,7 +13,7 @@ use super::desired::DesiredState;
 use super::env_resolve::{Prompter, resolve as resolve_env};
 use super::fetch::fetch_current_state;
 use super::plan::{EnvAction, diff};
-use super::preflight::validate_hosts_against;
+use super::preflight::ensure_hosts_ready;
 use super::render::{PlanStyles, render};
 
 const CONFIG_FILE: &str = "unisrv.hcl";
@@ -27,9 +26,7 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     let config = UpConfig::load(path)?;
     let desired = DesiredState::from_config(config);
 
-    let hosts = client.list_hosts().await?;
-    let referenced: BTreeSet<&str> = desired.services.values().map(|s| s.host.as_str()).collect();
-    validate_hosts_against(&referenced, &hosts)?;
+    let hosts = ensure_hosts_ready(client, &desired).await?;
 
     let prompter = DialoguerPrompter;
     let env_action = resolve_env(client, &desired.project, env_flag, &prompter).await?;

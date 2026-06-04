@@ -7,7 +7,29 @@ use unisrv_api::ApiClient;
 use unisrv_api::models::{ClaimHostRequest, DnsConfigResponse, HostResponse};
 
 pub async fn claim(client: &dyn ApiClient, hostname: &str) -> Result<()> {
-    claim_with_confirm(client, hostname, prompt_dns_confirmation).await
+    claim_with_confirm(client, hostname, prompt_dns_confirmation)
+        .await
+        .map(|_| ())
+}
+
+/// Claim and provision a `*.unisrv.dev` host non-interactively. DNS for these
+/// domains is preconfigured, so the claim flow never reaches the DNS prompt.
+/// Used by `unisrv up` to auto-claim managed subdomains during preflight.
+pub(crate) async fn provision_managed_host(
+    client: &dyn ApiClient,
+    hostname: &str,
+) -> Result<HostResponse> {
+    debug_assert!(
+        is_unisrv_managed_domain(hostname),
+        "provision_managed_host is only valid for *.unisrv.dev hosts"
+    );
+    claim_with_confirm(client, hostname, || {
+        Err(anyhow::anyhow!(
+            "claim for managed host unexpectedly required DNS confirmation; \
+             the API returned an unrecognized hostname"
+        ))
+    })
+    .await
 }
 
 fn prompt_dns_confirmation() -> Result<bool> {
@@ -17,7 +39,11 @@ fn prompt_dns_confirmation() -> Result<bool> {
         .interact()?)
 }
 
-async fn claim_with_confirm<F>(client: &dyn ApiClient, hostname: &str, confirm: F) -> Result<()>
+async fn claim_with_confirm<F>(
+    client: &dyn ApiClient,
+    hostname: &str,
+    confirm: F,
+) -> Result<HostResponse>
 where
     F: FnOnce() -> Result<bool>,
 {
@@ -35,7 +61,7 @@ where
             "\u{2713} {} is already provisioned. Certificate valid until {}.",
             host.host, valid_until
         );
-        return Ok(());
+        return Ok(host);
     }
 
     let cert_exists = host.certificate_valid_until.is_some();
@@ -50,7 +76,7 @@ where
                 "Aborted. Re-run `unisrv host claim {}` once DNS is configured.",
                 host.host
             );
-            return Ok(());
+            return Ok(host);
         }
     }
 
@@ -62,15 +88,26 @@ where
         "\u{1f512} Certificate provisioned for {}. Valid until {}.",
         host.host, valid_until
     );
-    Ok(())
+    Ok(host)
 }
 
-fn is_unisrv_managed_domain(host: &str) -> bool {
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
-    normalized.ends_with(".unisrv.dev")
+/// Canonical form for comparing hostnames: lowercased, trailing dot stripped.
+/// DNS names are case-insensitive and an FQDN may carry a trailing root dot, so
+/// two spellings of the same host must compare equal.
+pub(crate) fn normalize_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+pub(crate) fn is_unisrv_managed_domain(host: &str) -> bool {
+    normalize_host(host).ends_with(".unisrv.dev")
 }
 
 fn cert_in_lockout(host: &HostResponse, now: chrono::NaiveDateTime) -> bool {
+    // Without a certificate type there is no real cert, regardless of any
+    // valid_until the API may report — so it cannot be in a renewal lockout.
+    if host.certificate_type.is_none() {
+        return false;
+    }
     let Some(valid_until) = host.certificate_valid_until else {
         return false;
     };
@@ -379,9 +416,61 @@ mod tests {
         assert_eq!(calls.request_host_cert_calls, vec![host_id()]);
     }
 
+    #[tokio::test]
+    async fn provision_managed_host_errors_when_claim_returns_unmanaged_host() {
+        // Defensive: if the API ever returns a host whose name is not a managed
+        // *.unisrv.dev domain and carries no cert, the DNS-confirmation branch
+        // is reached. It must surface a clean error, not panic the CLI.
+        let mut unexpected = unprovisioned_host();
+        unexpected.host = "elsewhere.example.com".into();
+        let mock = MockApiClient::logged_in()
+            .with_claim_host(Ok(unexpected))
+            .with_dns_config(Ok(dns_config()));
+
+        let err = provision_managed_host(&mock, "good.unisrv.dev")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected"),
+            "expected an unexpected-DNS-prompt error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_cert_when_valid_until_set_but_no_cert_type() {
+        // Odd server state: a future valid_until with no certificate_type is not
+        // a real cert. It must not be mistaken for "already provisioned" (which
+        // would return a no-op success and leave the host without a cert) — we
+        // must still request the certificate.
+        let mut claimed = unprovisioned_host();
+        claimed.certificate_valid_until = Some(Utc::now().naive_utc() + Duration::days(30));
+        // certificate_type stays None: no actual cert exists.
+        let mock = MockApiClient::logged_in()
+            .with_claim_host(Ok(claimed))
+            .with_request_host_cert(Ok(provisioned_host(0, 90)));
+
+        let result = claim_with_confirm(&mock, "example.com", || {
+            panic!("DNS prompt should be skipped when a valid_until is already present")
+        })
+        .await;
+        assert!(result.is_ok(), "expected ok, got {result:?}");
+
+        let calls = mock.calls.lock().unwrap();
+        assert_eq!(calls.request_host_cert_calls, vec![host_id()]);
+    }
+
     #[test]
     fn cert_in_lockout_handles_missing_expiry() {
         let host = unprovisioned_host();
+        assert!(!cert_in_lockout(&host, Utc::now().naive_utc()));
+    }
+
+    #[test]
+    fn cert_in_lockout_is_false_without_a_cert_type() {
+        // valid_until in the lockout window but no certificate_type → there is
+        // no real cert to be locked out of renewing.
+        let mut host = provisioned_host(10, 90);
+        host.certificate_type = None;
         assert!(!cert_in_lockout(&host, Utc::now().naive_utc()));
     }
 
