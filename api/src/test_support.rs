@@ -24,6 +24,8 @@ pub struct CallLog {
     pub claim_host_calls: Vec<ClaimHostRequest>,
     pub get_hosts_dns_config_calls: u32,
     pub request_host_cert_calls: Vec<Uuid>,
+    pub link_host_calls: Vec<(Uuid, Uuid)>,
+    pub unlink_host_calls: Vec<(Uuid, Uuid)>,
     pub list_hosts_calls: u32,
     pub list_environments_calls: u32,
     pub create_environment_calls: Vec<CreateEnvironmentRequest>,
@@ -73,6 +75,8 @@ pub struct MockApiClient {
     pub claim_host_response: ResponseSlot<HostResponse>,
     pub dns_config_response: ResponseSlot<DnsConfigResponse>,
     pub request_host_cert_response: ResponseSlot<HostResponse>,
+    pub link_host_responses: Mutex<VecDeque<std::result::Result<HostResponse, ApiError>>>,
+    pub unlink_host_responses: Mutex<VecDeque<std::result::Result<HostResponse, ApiError>>>,
     pub list_hosts_response: ResponseSlot<Vec<HostResponse>>,
     pub list_environments_response: ResponseSlot<EnvironmentListResponse>,
     pub create_environment_response: ResponseSlot<EnvironmentResponse>,
@@ -107,6 +111,8 @@ impl Default for MockApiClient {
             claim_host_response: ResponseSlot::default(),
             dns_config_response: ResponseSlot::default(),
             request_host_cert_response: ResponseSlot::default(),
+            link_host_responses: Mutex::new(VecDeque::new()),
+            unlink_host_responses: Mutex::new(VecDeque::new()),
             list_hosts_response: ResponseSlot::default(),
             list_environments_response: ResponseSlot::default(),
             create_environment_response: ResponseSlot::default(),
@@ -225,6 +231,16 @@ impl MockApiClient {
             .lock()
             .unwrap()
             .push_back(resp);
+        self
+    }
+
+    pub fn push_link_host(self, resp: std::result::Result<HostResponse, ApiError>) -> Self {
+        self.link_host_responses.lock().unwrap().push_back(resp);
+        self
+    }
+
+    pub fn push_unlink_host(self, resp: std::result::Result<HostResponse, ApiError>) -> Self {
+        self.unlink_host_responses.lock().unwrap().push_back(resp);
         self
     }
 
@@ -437,16 +453,20 @@ impl ApiClient for MockApiClient {
     ) -> Result<CreateInstanceTCPProxyResponse> {
         unimplemented!()
     }
-    async fn create_network(&self, _: CreateInternalNetworkRequest) -> Result<NetworkResponse> {
+    async fn create_network(
+        &self,
+        _: Uuid,
+        _: CreateInternalNetworkRequest,
+    ) -> Result<NetworkResponse> {
         unimplemented!()
     }
-    async fn delete_network(&self, _: Uuid) -> Result<()> {
+    async fn delete_network(&self, _: Uuid, _: Uuid) -> Result<()> {
         unimplemented!()
     }
-    async fn list_networks(&self, _: bool) -> Result<NetworkListResponse> {
+    async fn list_networks(&self, _: Uuid, _: bool) -> Result<NetworkListResponse> {
         unimplemented!()
     }
-    async fn get_network(&self, _: Uuid) -> Result<NetworkResponse> {
+    async fn get_network(&self, _: Uuid, _: Uuid) -> Result<NetworkResponse> {
         unimplemented!()
     }
     async fn provision_service(
@@ -560,6 +580,30 @@ impl ApiClient for MockApiClient {
             calls.get_hosts_dns_config_calls += 1;
         }
         self.dns_config_response.take("dns_config_response")
+    }
+    async fn link_host_to_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("link_host_to_service");
+            calls.link_host_calls.push((id, service_id));
+        }
+        self.link_host_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("link_host_response not configured"))
+    }
+    async fn unlink_host_from_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("unlink_host_from_service");
+            calls.unlink_host_calls.push((id, service_id));
+        }
+        self.unlink_host_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("unlink_host_response not configured"))
     }
     async fn create_deployment(
         &self,

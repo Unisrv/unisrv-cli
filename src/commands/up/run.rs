@@ -13,7 +13,7 @@ use super::desired::DesiredState;
 use super::env_resolve::{Prompter, resolve as resolve_env};
 use super::fetch::fetch_current_state;
 use super::plan::{EnvAction, diff};
-use super::preflight::ensure_hosts_ready;
+use super::preflight::{ensure_hosts_ready, validate_host_ownership};
 use super::render::{PlanStyles, render};
 
 const CONFIG_FILE: &str = "unisrv.hcl";
@@ -26,6 +26,8 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     let config = UpConfig::load(path)?;
     let desired = DesiredState::from_config(config);
 
+    // Ensures every referenced host is claimed + cert-ready. The returned list
+    // is reused by apply for host→id resolution when linking/unlinking.
     let hosts = ensure_hosts_ready(client, &desired).await?;
 
     let prompter = DialoguerPrompter;
@@ -33,9 +35,14 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
 
     // If we're creating an env, there is no current state to fetch.
     let current = match &env_action {
-        EnvAction::Use(env) => fetch_current_state(client, env.id, &hosts).await?,
+        EnvAction::Use(env) => fetch_current_state(client, env.id).await?,
         EnvAction::Create(_) => super::plan::CurrentState::empty(),
     };
+
+    // A referenced host bound to a service outside this env can't be linked here
+    // (we don't own it). Fail before any mutation, while the state is still clean.
+    let managed_service_ids = current.services.values().map(|s| s.id).collect();
+    validate_host_ownership(&desired, &hosts, &managed_service_ids)?;
 
     let plan = diff(&desired, &current, env_action);
 
@@ -61,7 +68,7 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    apply(plan, client).await?;
+    apply(plan, client, &hosts).await?;
     Ok(())
 }
 

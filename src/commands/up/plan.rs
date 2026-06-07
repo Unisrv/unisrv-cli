@@ -40,7 +40,9 @@ impl CurrentState {
 pub struct CurrentService {
     pub id: Uuid,
     pub name: String,
-    pub host: String,
+    /// Custom hosts currently bound to this service (excludes the derived base
+    /// host). Sourced from the service detail's `custom_hosts`.
+    pub hosts: Vec<String>,
     pub region: String,
     pub configuration: HTTPServiceConfig,
 }
@@ -89,6 +91,9 @@ pub struct ResolvedEnvironment {
     pub id: Uuid,
     pub name: String,
     pub project: String,
+    /// Env slug, used to derive each service's base host for the post-`up`
+    /// reachability summary.
+    pub slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,7 +191,9 @@ pub fn diff(desired: &DesiredState, current: &CurrentState, env_action: EnvActio
                         desired: desired_svc.clone(),
                         reasons: immutable_diffs,
                     });
-                } else if desired_svc.configuration != current_svc.configuration {
+                } else if desired_svc.configuration != current_svc.configuration
+                    || super::diff::service::hosts_differ(desired_svc, current_svc)
+                {
                     service_actions.push(ServiceAction::Update {
                         id: current_svc.id,
                         desired: desired_svc.clone(),
@@ -304,6 +311,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "prod".into(),
             project: "demo".into(),
+            slug: "ab12".into(),
         })
     }
 
@@ -345,7 +353,7 @@ mod tests {
             name.into(),
             DesiredService {
                 name: name.into(),
-                host: host.into(),
+                hosts: vec![host.into()],
                 region: "dev".into(),
                 configuration: http_config(),
             },
@@ -360,7 +368,7 @@ mod tests {
             CurrentService {
                 id: Uuid::new_v4(),
                 name: name.into(),
-                host: host.into(),
+                hosts: vec![host.into()],
                 region: "dev".into(),
                 configuration: http_config(),
             },
@@ -433,21 +441,22 @@ mod tests {
     }
 
     #[test]
-    fn host_change_is_service_recreate() {
+    fn host_only_change_is_service_update() {
+        // Hosts are mutable (link/unlink), so a host-set change on an otherwise
+        // unchanged service is an Update — not a recreate, not a no-op.
         let plan = diff(
             &desired_with_service("web", "new.example.com"),
             &current_with_service("web", "old.example.com"),
             use_env(),
         );
-        match &plan.service_actions[0] {
-            ServiceAction::Recreate { reasons, .. } => {
-                assert!(matches!(
-                    reasons.as_slice(),
-                    [RecreateReason::ImmutableField { field: "host", .. }]
-                ));
-            }
-            other => panic!("expected Recreate, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                plan.service_actions.as_slice(),
+                [ServiceAction::Update { .. }]
+            ),
+            "expected Update, got {:?}",
+            plan.service_actions
+        );
     }
 
     #[test]
@@ -499,7 +508,7 @@ mod tests {
             CurrentService {
                 id: svc_id,
                 name: "web".into(),
-                host: "h.example".into(),
+                hosts: vec!["h.example".into()],
                 region: "dev".into(),
                 configuration: http_config(),
             },
@@ -526,8 +535,11 @@ mod tests {
     }
 
     #[test]
-    fn host_change_cascades_to_dependent_deployment_recreate() {
-        let mut desired = desired_with_service("web", "new.example");
+    fn service_recreate_cascades_to_dependent_deployment_recreate() {
+        // A service recreate (here triggered by a region change) cascade-
+        // recreates every deployment bound to it.
+        let mut desired = desired_with_service("web", "app.example");
+        desired.services.get_mut("web").unwrap().region = "us-east".into();
         desired.deployments.insert(
             "web".into(),
             DesiredDeployment {
@@ -546,7 +558,7 @@ mod tests {
             CurrentService {
                 id: svc_id,
                 name: "web".into(),
-                host: "old.example".into(),
+                hosts: vec!["app.example".into()],
                 region: "dev".into(),
                 configuration: http_config(),
             },
@@ -593,7 +605,7 @@ mod tests {
                 n.into(),
                 DesiredService {
                     name: n.into(),
-                    host: format!("{n}.example"),
+                    hosts: vec![format!("{n}.example")],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
@@ -622,7 +634,7 @@ mod tests {
                 CurrentService {
                     id,
                     name: n.into(),
-                    host: format!("{n}.example"),
+                    hosts: vec![format!("{n}.example")],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
@@ -757,18 +769,20 @@ mod tests {
             ("stable-svc", "stable.example", http_config()),
             ("create-svc", "create.example", http_config()),
             ("update-svc", "update.example", updated_cfg.clone()),
-            ("recreate-svc", "new-recreate.example", http_config()),
+            ("recreate-svc", "recreate.example", http_config()),
         ] {
             desired.services.insert(
                 name.into(),
                 DesiredService {
                     name: name.into(),
-                    host: host.into(),
+                    hosts: vec![host.into()],
                     region: "dev".into(),
                     configuration: cfg,
                 },
             );
         }
+        // recreate-svc recreates because its region (immutable) changes.
+        desired.services.get_mut("recreate-svc").unwrap().region = "us-east".into();
 
         // create-dep: new (binds to the new create-svc).
         // update-dep: image bump, binding unchanged on stable-svc.
@@ -812,7 +826,7 @@ mod tests {
         for (name, id, host) in [
             ("stable-svc", stable_id, "stable.example"),
             ("update-svc", update_id, "update.example"),
-            ("recreate-svc", recreate_id, "old-recreate.example"), // host differs
+            ("recreate-svc", recreate_id, "recreate.example"), // region differs (set on desired)
             ("delete-svc", delete_id, "delete.example"),
         ] {
             current.services.insert(
@@ -820,7 +834,7 @@ mod tests {
                 CurrentService {
                     id,
                     name: name.into(),
-                    host: host.into(),
+                    hosts: vec![host.into()],
                     region: "dev".into(),
                     configuration: http_config(),
                 },

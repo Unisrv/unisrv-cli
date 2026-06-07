@@ -89,6 +89,7 @@ fn entry_to_resolved(entry: &EnvironmentListEntry) -> ResolvedEnvironment {
         id: entry.id,
         name: entry.name.clone(),
         project: entry.project.clone(),
+        slug: entry.slug.clone(),
     }
 }
 
@@ -145,11 +146,13 @@ mod tests {
             id: Uuid::new_v4(),
             project: project.to_string(),
             name: name.to_string(),
+            slug: format!("{name}-slug"),
             display_name: None,
             description: None,
             instance_count: 0,
             service_count: 0,
             deployment_count: 0,
+            network_count: 0,
             created_at: NaiveDateTime::default(),
         }
     }

@@ -25,26 +25,19 @@ use crate::commands::up::plan::{CurrentService, RecreateReason};
 pub fn immutable_diffs(desired: &DesiredService, current: &CurrentService) -> Vec<RecreateReason> {
     let DesiredService {
         name: _,
-        host: d_host,
+        hosts: _,
         region: d_region,
         configuration: _,
     } = desired;
     let CurrentService {
         id: _,
         name: _,
-        host: c_host,
+        hosts: _,
         region: c_region,
         configuration: _,
     } = current;
 
     let mut out = Vec::new();
-    if d_host != c_host {
-        out.push(RecreateReason::ImmutableField {
-            field: "host",
-            old: c_host.clone(),
-            new: d_host.clone(),
-        });
-    }
     if d_region != c_region {
         out.push(RecreateReason::ImmutableField {
             field: "region",
@@ -53,6 +46,28 @@ pub fn immutable_diffs(desired: &DesiredService, current: &CurrentService) -> Ve
         });
     }
     out
+}
+
+/// True if the desired and current custom-host *sets* differ (order-insensitive
+/// — hosts are an unordered set, reconciled by link/unlink).
+pub fn hosts_differ(desired: &DesiredService, current: &CurrentService) -> bool {
+    let d: BTreeSet<&str> = desired.hosts.iter().map(String::as_str).collect();
+    let c: BTreeSet<&str> = current.hosts.iter().map(String::as_str).collect();
+    d != c
+}
+
+/// Computes the host link/unlink deltas to converge `current` to `desired`:
+/// `(to_link, to_unlink)`. `to_link` = desired hosts not currently bound;
+/// `to_unlink` = currently-bound hosts no longer desired.
+pub fn host_link_unlink(
+    desired: &DesiredService,
+    current: &CurrentService,
+) -> (Vec<String>, Vec<String>) {
+    let d: BTreeSet<&str> = desired.hosts.iter().map(String::as_str).collect();
+    let c: BTreeSet<&str> = current.hosts.iter().map(String::as_str).collect();
+    let to_link = d.difference(&c).map(|s| s.to_string()).collect();
+    let to_unlink = c.difference(&d).map(|s| s.to_string()).collect();
+    (to_link, to_unlink)
 }
 
 pub fn render_config_diff(
@@ -286,40 +301,57 @@ mod tests {
     }
 
     #[test]
-    fn immutable_diffs_detects_host_change() {
+    fn host_link_unlink_computes_set_deltas() {
         let desired = DesiredService {
             name: "web".into(),
-            host: "new.example".into(),
+            hosts: vec!["a.com".into(), "b.com".into()],
             region: "dev".into(),
             configuration: cfg(false, vec![]),
         };
         let current = CurrentService {
             id: Uuid::new_v4(),
             name: "web".into(),
-            host: "old.example".into(),
+            hosts: vec!["a.com".into(), "c.com".into()],
             region: "dev".into(),
             configuration: cfg(false, vec![]),
         };
-        let diffs = immutable_diffs(&desired, &current);
-        assert_eq!(diffs.len(), 1);
-        assert!(matches!(
-            diffs[0],
-            RecreateReason::ImmutableField { field: "host", .. }
-        ));
+        let (to_link, to_unlink) = host_link_unlink(&desired, &current);
+        assert_eq!(to_link, vec!["b.com".to_string()]);
+        assert_eq!(to_unlink, vec!["c.com".to_string()]);
+    }
+
+    #[test]
+    fn host_link_unlink_empty_when_sets_equal_regardless_of_order() {
+        let desired = DesiredService {
+            name: "web".into(),
+            hosts: vec!["a.com".into(), "b.com".into()],
+            region: "dev".into(),
+            configuration: cfg(false, vec![]),
+        };
+        let current = CurrentService {
+            id: Uuid::new_v4(),
+            name: "web".into(),
+            hosts: vec!["b.com".into(), "a.com".into()],
+            region: "dev".into(),
+            configuration: cfg(false, vec![]),
+        };
+        assert!(!hosts_differ(&desired, &current));
+        let (to_link, to_unlink) = host_link_unlink(&desired, &current);
+        assert!(to_link.is_empty() && to_unlink.is_empty());
     }
 
     #[test]
     fn immutable_diffs_detects_region_change() {
         let desired = DesiredService {
             name: "web".into(),
-            host: "h.example".into(),
+            hosts: vec!["h.example".into()],
             region: "us-east".into(),
             configuration: cfg(false, vec![]),
         };
         let current = CurrentService {
             id: Uuid::new_v4(),
             name: "web".into(),
-            host: "h.example".into(),
+            hosts: vec!["h.example".into()],
             region: "dev".into(),
             configuration: cfg(false, vec![]),
         };
@@ -338,14 +370,14 @@ mod tests {
     fn immutable_diffs_empty_when_only_config_differs() {
         let desired = DesiredService {
             name: "web".into(),
-            host: "h.example".into(),
+            hosts: vec!["h.example".into()],
             region: "dev".into(),
             configuration: cfg(true, vec![]),
         };
         let current = CurrentService {
             id: Uuid::new_v4(),
             name: "web".into(),
-            host: "h.example".into(),
+            hosts: vec!["h.example".into()],
             region: "dev".into(),
             configuration: cfg(false, vec![]),
         };

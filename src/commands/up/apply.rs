@@ -4,11 +4,18 @@
 //! 1. Create env (if EnvAction::Create).
 //! 2. Create new services.
 //! 3. Update services (config-only).
-//! 4. Delete deployments being deleted *or recreated* (frees bindings).
-//! 5. Recreate services: delete old, then create new (new IDs).
-//! 6. Create deployments (new + recreated, looks up service_id by name).
-//! 7. Update deployments (config-only).
-//! 8. Delete services being fully removed.
+//! 4. Unlink hosts dropped by *surviving* (updated) services.
+//! 5. Delete deployments being deleted *or recreated* (frees bindings).
+//! 6. Recreate services: delete old, then create new (new IDs).
+//! 7. Create deployments (new + recreated, looks up service_id by name).
+//! 8. Update deployments (config-only).
+//! 9. Delete services being fully removed (cascade-frees their hosts).
+//! 10. Link hosts to their desired services.
+//!
+//! HOST INVARIANT: every host-FREEING step (unlink pass #4; delete cascade #9)
+//! runs before the host-LINKING step (#10). A host can only be linked while
+//! unbound, so freeing must precede binding — otherwise the backend 409s. Deleted
+//! services are freed by the DB cascade, not an explicit unlink. Do not reorder.
 //!
 //! No rollback. On error, return immediately. Reconcile re-run will pick up.
 
@@ -16,27 +23,80 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use unisrv_api::ApiClient;
 use unisrv_api::models::{
-    CreateDeploymentRequest, DeploymentServiceBinding, ServiceProvisionRequest,
+    CreateDeploymentRequest, DeploymentServiceBinding, HostResponse, ServiceProvisionRequest,
     UpdateDeploymentRequest,
 };
 use uuid::Uuid;
 
 use super::desired::{DesiredDeployment, DesiredService, DesiredServiceBinding};
+use super::diff::service::host_link_unlink;
 use super::plan::{
     CurrentDeployment, CurrentService, DeploymentAction, EnvAction, Plan, ServiceAction,
 };
+use super::render::{Reachability, render_reachability};
+use crate::commands::host::normalize_host;
 
-pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
+pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -> Result<()> {
+    // Host string → claimed-host id, for resolving link/unlink targets. Hosts
+    // are user-global (not env-scoped), so this is just an id dictionary.
+    let host_ids: BTreeMap<String, Uuid> = hosts
+        .iter()
+        .map(|h| (normalize_host(&h.host), h.id))
+        .collect();
+
+    // Compute host reconciliation from the service actions up front (before
+    // partitioning consumes them). Deleted services need no explicit unlink —
+    // `ON DELETE SET NULL` clears their bindings. Recreated services have their
+    // links wiped by the delete half, so all desired hosts are re-linked.
+    let mut host_unlinks: Vec<(Uuid, Vec<String>)> = Vec::new();
+    let mut host_links: Vec<(String, Vec<String>)> = Vec::new();
+    for action in &plan.service_actions {
+        match action {
+            ServiceAction::Create(d) if !d.hosts.is_empty() => {
+                host_links.push((d.name.clone(), d.hosts.clone()));
+            }
+            ServiceAction::Update {
+                current, desired, ..
+            } => {
+                let (to_link, to_unlink) = host_link_unlink(desired, current);
+                if !to_unlink.is_empty() {
+                    host_unlinks.push((current.id, to_unlink));
+                }
+                if !to_link.is_empty() {
+                    host_links.push((desired.name.clone(), to_link));
+                }
+            }
+            ServiceAction::Recreate { desired, .. } if !desired.hosts.is_empty() => {
+                host_links.push((desired.name.clone(), desired.hosts.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    // Reachability summary data: each acted-on service's name + desired custom
+    // hosts. Base host is derived from the env slug once it's known below.
+    let reachable_services: Vec<(String, Vec<String>)> = plan
+        .service_actions
+        .iter()
+        .filter_map(|a| match a {
+            ServiceAction::Create(d) => Some((d.name.clone(), d.hosts.clone())),
+            ServiceAction::Update { desired, .. } | ServiceAction::Recreate { desired, .. } => {
+                Some((desired.name.clone(), desired.hosts.clone()))
+            }
+            ServiceAction::Delete(_) => None,
+        })
+        .collect();
+
     // ── Phase 1: env ──
-    let env_id = match plan.env_action {
-        EnvAction::Use(env) => env.id,
+    let (env_id, env_slug) = match plan.env_action {
+        EnvAction::Use(env) => (env.id, env.slug),
         EnvAction::Create(req) => {
             let env = client
                 .create_environment(req.clone())
                 .await
                 .with_context(|| format!("failed to create environment {:?}", req.name))?;
             println!("  + environment {} created", env.name);
-            env.id
+            (env.id, env.slug)
         }
     };
 
@@ -53,13 +113,37 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
         println!("  + service {} created", desired.name);
     }
 
-    // ── Phase 3: update services ──
-    for (id, desired) in services.updates {
-        client
-            .update_service(env_id, id, desired.configuration.clone())
-            .await
-            .with_context(|| format!("failed to update service {:?}", desired.name))?;
-        println!("  ~ service {} updated", desired.name);
+    // ── Phase 3: update services (config only; skip when config is unchanged
+    //    and only the host set differs — hosts are reconciled by link/unlink) ──
+    for (id, desired, current) in services.updates {
+        if desired.configuration != current.configuration {
+            client
+                .update_service(env_id, id, desired.configuration.clone())
+                .await
+                .with_context(|| format!("failed to update service {:?}", desired.name))?;
+            println!("  ~ service {} updated", desired.name);
+        }
+    }
+
+    // ── Unlink pass: free hosts no longer desired before anything rebinds ──
+    for (service_id, to_unlink) in &host_unlinks {
+        for host in to_unlink {
+            // An unlink target with no claimed-host row (host deleted out-of-band)
+            // is already effectively unbound — skip it rather than abort the apply
+            // mid-flight. Only links require a resolvable id (preflight guarantees
+            // referenced hosts are claimed).
+            let Some(host_id) = host_ids.get(&normalize_host(host)).copied() else {
+                eprintln!(
+                    "  ! skipping unlink of {host}: no claimed host found (already removed?)"
+                );
+                continue;
+            };
+            client
+                .unlink_host_from_service(host_id, *service_id)
+                .await
+                .with_context(|| format!("failed to unlink host {host:?}"))?;
+            println!("  - host {host} unlinked");
+        }
     }
 
     // ── Phase 4: delete deployments being removed or recreated ──
@@ -104,6 +188,14 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
     }
 
     // ── Phase 8: delete services being removed ──
+    //
+    // ORDERING INVARIANT: deletes MUST run before the link pass. A deleted
+    // service's host bindings are freed by `ON DELETE SET NULL`, so deleting
+    // here (before linking) lets a host move off a removed service onto a new
+    // one. Linking first would 409 ("already assigned to another service")
+    // because the host is still bound to the not-yet-deleted service. More
+    // broadly: every host-freeing step (this delete + the unlink pass) precedes
+    // every host-binding step (the link pass below). Do not reorder.
     for current in services.deletes {
         client
             .delete_service(env_id, current.id)
@@ -112,7 +204,43 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
         println!("  - service {} deleted", current.name);
     }
 
+    // ── Link pass: bind desired hosts to their (now final-id) services ──
+    for (service_name, to_link) in &host_links {
+        let service_id = *service_ids.get(service_name).ok_or_else(|| {
+            anyhow::anyhow!("internal: service {service_name:?} not found in id map for host link")
+        })?;
+        for host in to_link {
+            let host_id = resolve_host_id(&host_ids, host)?;
+            client
+                .link_host_to_service(host_id, service_id)
+                .await
+                .with_context(|| format!("failed to link host {host:?}"))?;
+            println!("  + host {host} linked");
+        }
+    }
+
+    // Reachability summary: every acted-on service's live base host + customs.
+    let reachability: Vec<Reachability> = reachable_services
+        .into_iter()
+        .map(|(service, custom_hosts)| Reachability {
+            base_host: format!("{service}-{env_slug}.unisrv.dev"),
+            service,
+            custom_hosts,
+        })
+        .collect();
+    print!("{}", render_reachability(&reachability));
+
     Ok(())
+}
+
+/// Resolve a host string to its claimed-host id. Preflight guarantees every
+/// referenced host is claimed, so a miss is an internal inconsistency.
+fn resolve_host_id(host_ids: &BTreeMap<String, Uuid>, host: &str) -> Result<Uuid> {
+    host_ids.get(&normalize_host(host)).copied().ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal: host {host:?} is not claimed (no id); preflight should have ensured this"
+        )
+    })
 }
 
 /// Service actions grouped by lifecycle phase.
@@ -122,7 +250,7 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient) -> Result<()> {
 #[derive(Default)]
 struct PartitionedServices {
     creates: Vec<DesiredService>,
-    updates: Vec<(Uuid, DesiredService)>,
+    updates: Vec<(Uuid, DesiredService, CurrentService)>,
     recreates: Vec<(CurrentService, DesiredService)>,
     deletes: Vec<CurrentService>,
 }
@@ -133,7 +261,11 @@ impl PartitionedServices {
         for action in actions {
             match action {
                 ServiceAction::Create(d) => p.creates.push(d),
-                ServiceAction::Update { id, desired, .. } => p.updates.push((id, desired)),
+                ServiceAction::Update {
+                    id,
+                    desired,
+                    current,
+                } => p.updates.push((id, desired, current)),
                 ServiceAction::Recreate {
                     current, desired, ..
                 } => p.recreates.push((current, desired)),
@@ -202,7 +334,6 @@ async fn create_service(
     let req = ServiceProvisionRequest {
         region: desired.region.clone(),
         name: desired.name.clone(),
-        host: desired.host.clone(),
         configuration: desired.configuration.clone(),
         instance_targets: vec![],
     };
@@ -264,11 +395,266 @@ mod tests {
     use chrono::NaiveDateTime;
     use unisrv_api::models::{
         CreateDeploymentResponse, DeploymentConfiguration, EnvironmentResponse, HTTPLocation,
-        HTTPLocationTarget, HTTPServiceConfig, ServiceProvisionResponse,
+        HTTPLocationTarget, HTTPServiceConfig, HostResponse, ServiceProvisionResponse,
     };
     use unisrv_api::test_support::MockApiClient;
 
     use crate::commands::up::plan::ResolvedEnvironment;
+
+    /// Minimal claimed-host fixture for host→id resolution in apply.
+    fn host_response(id: Uuid, host: &str) -> HostResponse {
+        HostResponse {
+            id,
+            host: host.into(),
+            user_id: Uuid::new_v4(),
+            service_id: None,
+            certificate_type: None,
+            certificate_valid_until: None,
+            created_at: NaiveDateTime::default(),
+            updated_at: NaiveDateTime::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_links_desired_hosts_to_new_service() {
+        // A newly created service links all its desired hosts, bound to the id
+        // returned by the create (resolved via the service_ids map).
+        let new_svc_id = Uuid::new_v4();
+        let h_id = Uuid::new_v4();
+        let hosts = vec![host_response(h_id, "shop.acme.com")];
+
+        let client = MockApiClient::logged_in()
+            .push_provision_service(Ok(ServiceProvisionResponse {
+                service_id: new_svc_id,
+            }))
+            .push_link_host(Ok(host_response(h_id, "shop.acme.com")));
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Create(DesiredService {
+                name: "web".into(),
+                hosts: vec!["shop.acme.com".into()],
+                region: "dev".into(),
+                configuration: http_config(),
+            })],
+            deployment_actions: vec![],
+            existing_service_ids: BTreeMap::new(),
+        };
+
+        apply(plan, &client, &hosts).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.link_host_calls, vec![(h_id, new_svc_id)]);
+        assert!(calls.unlink_host_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recreate_relinks_all_desired_hosts_to_new_service_id() {
+        // A recreate deletes the old service (cascade-nulling its host links),
+        // so all desired hosts must be re-linked to the NEW service id.
+        let old_id = Uuid::new_v4();
+        let new_id = Uuid::new_v4();
+        let h_id = Uuid::new_v4();
+        let hosts = vec![host_response(h_id, "shop.acme.com")];
+
+        let client = MockApiClient::logged_in()
+            .push_provision_service(Ok(ServiceProvisionResponse { service_id: new_id }))
+            .push_link_host(Ok(host_response(h_id, "shop.acme.com")));
+
+        let mut existing = BTreeMap::new();
+        existing.insert("web".to_string(), old_id);
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Recreate {
+                current: CurrentService {
+                    id: old_id,
+                    name: "web".into(),
+                    hosts: vec!["shop.acme.com".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+                desired: DesiredService {
+                    name: "web".into(),
+                    hosts: vec!["shop.acme.com".into()],
+                    region: "us-east".into(),
+                    configuration: http_config(),
+                },
+                reasons: vec![RecreateReason::ImmutableField {
+                    field: "region",
+                    old: "dev".into(),
+                    new: "us-east".into(),
+                }],
+            }],
+            deployment_actions: vec![],
+            existing_service_ids: existing,
+        };
+
+        apply(plan, &client, &hosts).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        // No explicit unlink (cascade handles the old service's links).
+        assert!(calls.unlink_host_calls.is_empty());
+        // Re-linked to the NEW service id.
+        assert_eq!(calls.link_host_calls, vec![(h_id, new_id)]);
+    }
+
+    #[tokio::test]
+    async fn host_only_update_links_added_unlinks_removed_no_config_put() {
+        // Service config is identical; only its host set changes (c.com → b.com).
+        // Apply must unlink c.com and link b.com (unlink BEFORE link), resolve
+        // both host UUIDs from the hosts list, and NOT re-PUT the config.
+        let svc_id = Uuid::new_v4();
+        let b_id = Uuid::new_v4();
+        let c_id = Uuid::new_v4();
+        let hosts = vec![host_response(b_id, "b.com"), host_response(c_id, "c.com")];
+
+        let client = MockApiClient::logged_in()
+            .push_unlink_host(Ok(host_response(c_id, "c.com")))
+            .push_link_host(Ok(host_response(b_id, "b.com")));
+
+        let mut existing = BTreeMap::new();
+        existing.insert("web".to_string(), svc_id);
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Update {
+                id: svc_id,
+                desired: DesiredService {
+                    name: "web".into(),
+                    hosts: vec!["b.com".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+                current: CurrentService {
+                    id: svc_id,
+                    name: "web".into(),
+                    hosts: vec!["c.com".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+            }],
+            deployment_actions: vec![],
+            existing_service_ids: existing,
+        };
+
+        apply(plan, &client, &hosts).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.unlink_host_calls, vec![(c_id, svc_id)]);
+        assert_eq!(calls.link_host_calls, vec![(b_id, svc_id)]);
+        assert!(
+            calls.update_service_calls.is_empty(),
+            "config unchanged → no update_service PUT"
+        );
+        let unlink_pos = calls
+            .call_order
+            .iter()
+            .position(|m| *m == "unlink_host_from_service");
+        let link_pos = calls
+            .call_order
+            .iter()
+            .position(|m| *m == "link_host_to_service");
+        assert!(unlink_pos < link_pos, "unlink must precede link");
+    }
+
+    #[tokio::test]
+    async fn deleted_service_is_removed_before_host_is_linked_elsewhere() {
+        // A host moves off a service being DELETED onto a new service. The delete
+        // (which cascade-frees the host via ON DELETE SET NULL) must run BEFORE
+        // the link, or the backend 409s ("already assigned to another service").
+        let web_id = Uuid::new_v4();
+        let unisrv_id = Uuid::new_v4();
+        let h_id = Uuid::new_v4();
+        let mut h = host_response(h_id, "h.example");
+        h.service_id = Some(web_id); // currently bound to the doomed service
+        let hosts = vec![h];
+
+        let client = MockApiClient::logged_in()
+            .push_provision_service(Ok(ServiceProvisionResponse {
+                service_id: unisrv_id,
+            }))
+            .push_delete_service(Ok(()))
+            .push_link_host(Ok(host_response(h_id, "h.example")));
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![
+                ServiceAction::Create(DesiredService {
+                    name: "unisrv".into(),
+                    hosts: vec!["h.example".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                }),
+                ServiceAction::Delete(CurrentService {
+                    id: web_id,
+                    name: "web".into(),
+                    hosts: vec!["h.example".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                }),
+            ],
+            deployment_actions: vec![],
+            existing_service_ids: BTreeMap::new(),
+        };
+
+        apply(plan, &client, &hosts).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        let delete_pos = calls.call_order.iter().position(|m| *m == "delete_service");
+        let link_pos = calls
+            .call_order
+            .iter()
+            .position(|m| *m == "link_host_to_service");
+        assert!(
+            delete_pos < link_pos,
+            "delete_service must precede link_host_to_service, got order: {:?}",
+            calls.call_order
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_unlink_target_is_skipped_not_fatal() {
+        // A surviving service drops a host that is no longer in the claimed-host
+        // list (e.g. the host row was deleted out-of-band). The unlink can't be
+        // resolved to an id; apply must skip it (the binding is moot) rather than
+        // abort mid-flight and leave a partially-applied environment.
+        let svc_id = Uuid::new_v4();
+        let hosts: Vec<HostResponse> = vec![]; // "gone.example" not present
+        let client = MockApiClient::logged_in(); // no unlink response queued
+
+        let mut existing = BTreeMap::new();
+        existing.insert("web".to_string(), svc_id);
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Update {
+                id: svc_id,
+                desired: DesiredService {
+                    name: "web".into(),
+                    hosts: vec![],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+                current: CurrentService {
+                    id: svc_id,
+                    name: "web".into(),
+                    hosts: vec!["gone.example".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+            }],
+            deployment_actions: vec![],
+            existing_service_ids: existing,
+        };
+
+        apply(plan, &client, &hosts).await.unwrap(); // must NOT error
+        assert!(client.calls.lock().unwrap().unlink_host_calls.is_empty());
+    }
 
     fn http_config() -> HTTPServiceConfig {
         HTTPServiceConfig {
@@ -303,6 +689,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "prod".into(),
             project: "demo".into(),
+            slug: "ab12".into(),
         })
     }
 
@@ -316,15 +703,13 @@ mod tests {
                 id: new_env_id,
                 project: "demo".into(),
                 name: "prod".into(),
+                slug: "ab12".into(),
                 display_name: None,
                 description: None,
                 created_at: NaiveDateTime::default(),
                 updated_at: NaiveDateTime::default(),
             }))
-            .push_provision_service(Ok(ServiceProvisionResponse {
-                service_id: svc_id,
-                connection_string: "n/a".into(),
-            }))
+            .push_provision_service(Ok(ServiceProvisionResponse { service_id: svc_id }))
             .push_create_deployment(Ok(CreateDeploymentResponse { id: dep_id }));
 
         let plan = Plan {
@@ -337,7 +722,7 @@ mod tests {
             }),
             service_actions: vec![ServiceAction::Create(DesiredService {
                 name: "web".into(),
-                host: "web.example".into(),
+                hosts: vec![],
                 region: "dev".into(),
                 configuration: http_config(),
             })],
@@ -352,7 +737,7 @@ mod tests {
             existing_service_ids: BTreeMap::new(),
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.create_environment_calls.len(), 1);
@@ -360,7 +745,6 @@ mod tests {
         let (env_for_service, service_req) = &calls.provision_service_calls[0];
         assert_eq!(*env_for_service, new_env_id);
         assert_eq!(service_req.name, "web");
-        assert_eq!(service_req.host, "web.example");
 
         assert_eq!(calls.create_deployment_calls.len(), 1);
         let (env_for_dep, dep_req) = &calls.create_deployment_calls[0];
@@ -391,14 +775,14 @@ mod tests {
                 id: svc_id,
                 desired: DesiredService {
                     name: "web".into(),
-                    host: "web.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: new_cfg,
                 },
                 current: CurrentService {
                     id: svc_id,
                     name: "web".into(),
-                    host: "web.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
@@ -420,7 +804,7 @@ mod tests {
             existing_service_ids: existing,
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.update_service_calls.len(), 1);
@@ -438,7 +822,6 @@ mod tests {
         let client = MockApiClient::logged_in()
             .push_provision_service(Ok(ServiceProvisionResponse {
                 service_id: new_svc_id,
-                connection_string: "x".into(),
             }))
             .push_create_deployment(Ok(CreateDeploymentResponse { id: new_dep_id }));
 
@@ -452,13 +835,13 @@ mod tests {
                 current: CurrentService {
                     id: old_svc_id,
                     name: "web".into(),
-                    host: "old.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
                 desired: DesiredService {
                     name: "web".into(),
-                    host: "new.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
@@ -494,7 +877,7 @@ mod tests {
             existing_service_ids: existing,
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         // Old deployment deleted before service recreate.
@@ -524,7 +907,7 @@ mod tests {
             service_actions: vec![ServiceAction::Delete(CurrentService {
                 id: svc_id,
                 name: "old".into(),
-                host: "old.example".into(),
+                hosts: vec![],
                 region: "dev".into(),
                 configuration: http_config(),
             })],
@@ -537,7 +920,7 @@ mod tests {
             existing_service_ids: BTreeMap::new(),
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.delete_deployment_calls.len(), 1);
@@ -562,7 +945,7 @@ mod tests {
             existing_service_ids: BTreeMap::new(),
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         let (_env, req) = &calls.create_deployment_calls[0];
@@ -593,11 +976,9 @@ mod tests {
         let client = MockApiClient::logged_in()
             .push_provision_service(Ok(ServiceProvisionResponse {
                 service_id: new_create_svc_id,
-                connection_string: "n/a".into(),
             }))
             .push_provision_service(Ok(ServiceProvisionResponse {
                 service_id: new_recreate_svc_id,
-                connection_string: "n/a".into(),
             }))
             // Two create_deployment calls in phase 6: create-dep then recreate-dep.
             .push_create_deployment(Ok(CreateDeploymentResponse {
@@ -622,7 +1003,7 @@ mod tests {
             service_actions: vec![
                 ServiceAction::Create(DesiredService {
                     name: "create-svc".into(),
-                    host: "create.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: http_config(),
                 }),
@@ -630,14 +1011,14 @@ mod tests {
                     id: update_svc_id,
                     desired: DesiredService {
                         name: "update-svc".into(),
-                        host: "update.example".into(),
+                        hosts: vec![],
                         region: "dev".into(),
                         configuration: updated_cfg,
                     },
                     current: CurrentService {
                         id: update_svc_id,
                         name: "update-svc".into(),
-                        host: "update.example".into(),
+                        hosts: vec![],
                         region: "dev".into(),
                         configuration: http_config(),
                     },
@@ -646,13 +1027,13 @@ mod tests {
                     current: CurrentService {
                         id: old_recreate_svc_id,
                         name: "recreate-svc".into(),
-                        host: "old-recreate.example".into(),
+                        hosts: vec![],
                         region: "dev".into(),
                         configuration: http_config(),
                     },
                     desired: DesiredService {
                         name: "recreate-svc".into(),
-                        host: "new-recreate.example".into(),
+                        hosts: vec![],
                         region: "dev".into(),
                         configuration: http_config(),
                     },
@@ -665,7 +1046,7 @@ mod tests {
                 ServiceAction::Delete(CurrentService {
                     id: delete_svc_id,
                     name: "delete-svc".into(),
-                    host: "delete.example".into(),
+                    hosts: vec![],
                     region: "dev".into(),
                     configuration: http_config(),
                 }),
@@ -733,7 +1114,7 @@ mod tests {
             existing_service_ids: existing,
         };
 
-        apply(plan, &client).await.unwrap();
+        apply(plan, &client, &[]).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
 

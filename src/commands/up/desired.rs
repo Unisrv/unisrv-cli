@@ -11,6 +11,8 @@ use unisrv_api::models::{
     DeploymentConfiguration, HTTPLocation, HTTPLocationTarget, HTTPServiceConfig,
 };
 
+use crate::commands::host::normalize_host;
+
 use super::config::UpConfig;
 use super::defaults::*;
 
@@ -26,7 +28,9 @@ pub struct DesiredState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesiredService {
     pub name: String,
-    pub host: String,
+    /// Custom hosts to bind to this service. May be empty — the service is
+    /// always reachable at its derived base host regardless.
+    pub hosts: Vec<String>,
     pub region: String,
     pub configuration: HTTPServiceConfig,
 }
@@ -65,7 +69,14 @@ impl DesiredState {
                 };
                 let svc = DesiredService {
                     name: name.clone(),
-                    host: block.host,
+                    // Canonicalize (lowercase, strip trailing dot) so the claim,
+                    // the link/unlink set-diff, and reachability all agree.
+                    hosts: block
+                        .hosts
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|h| normalize_host(h))
+                        .collect(),
                     region: DEFAULT_REGION.to_string(),
                     configuration,
                 };
@@ -120,16 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_hosts_lowercase_and_strips_trailing_dot() {
+        // DNS is case-insensitive and FQDNs may carry a trailing dot. Canonicalize
+        // at parse so the claim, the link/unlink diff, and the reachability output
+        // all use one spelling — no churn, and no uppercase-base-host 400 at claim.
+        let state = parse(
+            r#"
+project = "demo"
+service "web" { hosts = ["Web.Example.COM.", "myapp.unisrv.dev"] }
+"#,
+        );
+        assert_eq!(
+            state.services["web"].hosts,
+            vec![
+                "web.example.com".to_string(),
+                "myapp.unisrv.dev".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn fills_in_service_defaults() {
         let state = parse(
             r#"
 project = "demo"
-service "web" { host = "web.example.com" }
+service "web" { hosts = ["web.example.com"] }
 "#,
         );
         let svc = &state.services["web"];
         assert_eq!(svc.name, "web");
-        assert_eq!(svc.host, "web.example.com");
+        assert_eq!(svc.hosts, vec!["web.example.com".to_string()]);
         assert_eq!(svc.region, DEFAULT_REGION);
         assert_eq!(svc.configuration.allow_http, false);
         assert_eq!(svc.configuration.locations.len(), 1);
@@ -146,7 +177,7 @@ service "web" { host = "web.example.com" }
         let state = parse(
             r#"
 project = "demo"
-service "web" { host = "web.example.com" }
+service "web" { hosts = ["web.example.com"] }
 deployment "web" {
   service = "web"
   port    = 8080

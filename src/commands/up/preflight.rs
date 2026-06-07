@@ -19,7 +19,11 @@ pub async fn ensure_hosts_ready(
     client: &dyn ApiClient,
     desired: &DesiredState,
 ) -> Result<Vec<HostResponse>> {
-    let referenced: BTreeSet<&str> = desired.services.values().map(|s| s.host.as_str()).collect();
+    let referenced: BTreeSet<&str> = desired
+        .services
+        .values()
+        .flat_map(|s| s.hosts.iter().map(String::as_str))
+        .collect();
     let mut hosts = client.list_hosts().await?;
     let now = Utc::now().naive_utc();
 
@@ -46,13 +50,25 @@ pub async fn ensure_hosts_ready(
     Ok(hosts)
 }
 
-/// A host is ready to serve when it carries a certificate that is still valid.
+/// A host is ready to serve when it has a usable certificate:
+///  * `common_wildcard` — served by the platform `*.unisrv.dev` wildcard cert,
+///    which has no per-host expiry. Ready as soon as it's claimed.
+///  * `lets_encrypt` / `custom` — ready only while their per-host cert is valid.
+///  * no cert type — not ready.
 fn has_valid_cert(host: &HostResponse, now: chrono::NaiveDateTime) -> bool {
-    host.certificate_type.is_some()
-        && host
-            .certificate_valid_until
-            .map(|until| until > now)
-            .unwrap_or(false)
+    use unisrv_api::models::CertificateType;
+    match host.certificate_type {
+        Some(CertificateType::CommonWildcard) => true,
+        // Unknown is treated like a per-host cert: ready only while it has an
+        // unexpired validity. Conservative for a future backend variant — never
+        // reports a cert-less host as ready.
+        Some(CertificateType::LetsEncrypt | CertificateType::Custom | CertificateType::Unknown) => {
+            host.certificate_valid_until
+                .map(|until| until > now)
+                .unwrap_or(false)
+        }
+        None => false,
+    }
 }
 
 pub fn validate_hosts_against(
@@ -88,15 +104,55 @@ pub fn validate_hosts_against(
     Ok(())
 }
 
+/// Reject any referenced host that is currently bound to a service this
+/// environment does not manage. Hosts are global, so a host owned by a service
+/// in another environment (or attached out-of-band) must NOT be silently
+/// re-linked here — apply would otherwise 409 at link time, mid-mutation. This
+/// runs after `fetch_current_state`, so `managed_service_ids` is the set of
+/// service ids currently live in this environment (a host bound to one of them
+/// is fine: it is kept, updated, or freed by a delete cascade).
+pub fn validate_host_ownership(
+    desired: &DesiredState,
+    hosts: &[HostResponse],
+    managed_service_ids: &std::collections::BTreeSet<uuid::Uuid>,
+) -> Result<()> {
+    let referenced: BTreeSet<String> = desired
+        .services
+        .values()
+        .flat_map(|s| s.hosts.iter().map(|h| normalize_host(h)))
+        .collect();
+    let by_host: std::collections::BTreeMap<String, &HostResponse> =
+        hosts.iter().map(|h| (normalize_host(&h.host), h)).collect();
+    for host in &referenced {
+        let Some(h) = by_host.get(host) else { continue };
+        if let Some(sid) = h.service_id
+            && !managed_service_ids.contains(&sid)
+        {
+            bail!(
+                "host {host:?} is already bound to another service outside this environment. \
+                 Unlink it there before binding it here."
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, NaiveDateTime};
     use std::collections::BTreeMap;
     use unisrv_api::ApiError;
-    use unisrv_api::models::HTTPServiceConfig;
+    use unisrv_api::models::{CertificateType, HTTPServiceConfig};
     use unisrv_api::test_support::MockApiClient;
     use uuid::Uuid;
+
+    /// A claimed base-domain host: stamped `common_wildcard` at claim, no expiry.
+    fn wildcard_host(host: &str) -> HostResponse {
+        let mut h = host_with_cert(host, false);
+        h.certificate_type = Some(CertificateType::CommonWildcard);
+        h
+    }
 
     use crate::commands::up::desired::{DesiredService, DesiredState};
 
@@ -111,7 +167,7 @@ mod tests {
                 h.to_string(),
                 DesiredService {
                     name: h.to_string(),
-                    host: h.to_string(),
+                    hosts: vec![h.to_string()],
                     region: "dev".into(),
                     configuration: HTTPServiceConfig {
                         allow_http: false,
@@ -135,7 +191,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             service_id: None,
             certificate_type: if valid {
-                Some("letsencrypt".into())
+                Some(unisrv_api::models::CertificateType::LetsEncrypt)
             } else {
                 None
             },
@@ -183,43 +239,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_claims_and_provisions_unclaimed_unisrv_dev_host() {
+    async fn ready_claims_unclaimed_unisrv_dev_host_without_cert_request() {
+        // An unclaimed *.unisrv.dev host is auto-claimed; the claim stamps
+        // `common_wildcard` and is immediately ready. No per-host cert request
+        // (that would 400), no DNS prompt.
         let client = MockApiClient::logged_in()
             .with_list_hosts(Ok(vec![]))
-            .with_claim_host(Ok(host_with_cert("test.unisrv.dev", false)))
-            .with_request_host_cert(Ok(host_with_cert("test.unisrv.dev", true)));
+            .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["test.unisrv.dev"]);
 
         let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
 
-        // Returned list reflects the freshly provisioned host.
+        // Returned list reflects the freshly claimed, wildcard-covered host.
         let host = hosts.iter().find(|h| h.host == "test.unisrv.dev").unwrap();
-        assert!(host.certificate_type.is_some());
+        assert_eq!(host.certificate_type, Some(CertificateType::CommonWildcard));
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.claim_host_calls.len(), 1);
         assert_eq!(calls.claim_host_calls[0].host, "test.unisrv.dev");
-        assert_eq!(calls.request_host_cert_calls.len(), 1);
-        // unisrv.dev DNS is preconfigured — no DNS lookup or prompt.
+        assert!(calls.request_host_cert_calls.is_empty());
         assert_eq!(calls.get_hosts_dns_config_calls, 0);
     }
 
     #[tokio::test]
-    async fn ready_provisions_cert_for_claimed_but_certless_unisrv_dev_host() {
-        // Host already claimed (e.g. an interrupted claim) but has no cert.
+    async fn ready_reclaims_certless_unisrv_dev_host_without_cert_request() {
+        // Host row exists but isn't yet wildcard-ready (e.g. an interrupted
+        // claim). Re-claiming stamps `common_wildcard`; still no cert request.
         let client = MockApiClient::logged_in()
             .with_list_hosts(Ok(vec![host_with_cert("test.unisrv.dev", false)]))
-            .with_claim_host(Ok(host_with_cert("test.unisrv.dev", false)))
-            .with_request_host_cert(Ok(host_with_cert("test.unisrv.dev", true)));
+            .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["test.unisrv.dev"]);
 
         let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
 
         let host = hosts.iter().find(|h| h.host == "test.unisrv.dev").unwrap();
-        assert!(host.certificate_type.is_some());
+        assert_eq!(host.certificate_type, Some(CertificateType::CommonWildcard));
 
         let calls = client.calls.lock().unwrap();
-        assert_eq!(calls.request_host_cert_calls.len(), 1);
+        assert_eq!(calls.claim_host_calls.len(), 1);
+        assert!(calls.request_host_cert_calls.is_empty());
         assert_eq!(calls.get_hosts_dns_config_calls, 0);
     }
 
@@ -293,8 +351,7 @@ mod tests {
         // the next run) but still fail on the custom domain.
         let client = MockApiClient::logged_in()
             .with_list_hosts(Ok(vec![]))
-            .with_claim_host(Ok(host_with_cert("test.unisrv.dev", false)))
-            .with_request_host_cert(Ok(host_with_cert("test.unisrv.dev", true)));
+            .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["app.example.com", "test.unisrv.dev"]);
 
         let err = ensure_hosts_ready(&client, &desired).await.unwrap_err();
@@ -306,11 +363,21 @@ mod tests {
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.claim_host_calls.len(), 1);
         assert_eq!(calls.claim_host_calls[0].host, "test.unisrv.dev");
-        assert_eq!(calls.request_host_cert_calls.len(), 1);
+        assert!(calls.request_host_cert_calls.is_empty());
     }
 
     // ── validate_hosts_against: cert edge cases (a claimed custom domain whose
     //    cert is missing/expired is never auto-fixed, so it surfaces here) ──
+
+    #[test]
+    fn validate_accepts_common_wildcard_host_without_expiry() {
+        // A claimed *.unisrv.dev host is served by the platform wildcard cert:
+        // certificate_type = common_wildcard, no per-host valid_until. It must
+        // count as ready even though it has no expiry.
+        let h = wildcard_host("app.unisrv.dev");
+        let referenced: BTreeSet<&str> = ["app.unisrv.dev"].into_iter().collect();
+        assert!(validate_hosts_against(&referenced, &[h], Utc::now().naive_utc()).is_ok());
+    }
 
     #[test]
     fn validate_flags_claimed_host_without_cert() {
@@ -328,5 +395,47 @@ mod tests {
         let referenced: BTreeSet<&str> = ["h.example"].into_iter().collect();
         let err = validate_hosts_against(&referenced, &[h], Utc::now().naive_utc()).unwrap_err();
         assert!(format!("{err:#}").contains("certificate"));
+    }
+
+    #[test]
+    fn unknown_cert_type_is_ready_only_with_unexpired_validity() {
+        let now = Utc::now().naive_utc();
+        let mut h = host_with_cert("x.example.com", true);
+        h.certificate_type = Some(CertificateType::Unknown);
+        h.certificate_valid_until = Some(now + Duration::days(10));
+        assert!(has_valid_cert(&h, now), "unknown + future expiry → ready");
+        h.certificate_valid_until = Some(now - Duration::days(1));
+        assert!(!has_valid_cert(&h, now), "unknown + expired → not ready");
+        h.certificate_valid_until = None;
+        assert!(!has_valid_cert(&h, now), "unknown + no expiry → not ready");
+    }
+
+    #[test]
+    fn ownership_rejects_host_bound_to_a_service_this_env_does_not_manage() {
+        // Hosts are global. A referenced host bound to a service NOT in this
+        // environment must error before any mutation — we never steal it.
+        let other_service = Uuid::new_v4();
+        let mut h = host_with_cert("shop.example.com", true);
+        h.service_id = Some(other_service);
+        let desired = desired_with_hosts(&["shop.example.com"]);
+        let managed: BTreeSet<Uuid> = BTreeSet::new(); // env manages no services
+
+        let err = validate_host_ownership(&desired, &[h], &managed).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("another service"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn ownership_allows_free_host_or_host_on_a_managed_service() {
+        let svc = Uuid::new_v4();
+        let managed: BTreeSet<Uuid> = [svc].into_iter().collect();
+        let desired = desired_with_hosts(&["a.example.com", "b.example.com"]);
+        // a.* is bound to a managed service (kept/updated/deleted here); b.* is free.
+        let mut bound = host_with_cert("a.example.com", true);
+        bound.service_id = Some(svc);
+        let free = host_with_cert("b.example.com", true); // service_id: None
+        assert!(validate_host_ownership(&desired, &[bound, free], &managed).is_ok());
     }
 }

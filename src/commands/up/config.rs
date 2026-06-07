@@ -24,7 +24,11 @@ pub struct UpConfig {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceBlock {
-    pub host: String,
+    /// Custom hosts to bind to this service. Optional — every service is always
+    /// reachable at its derived base host (`{name}-{env-slug}.unisrv.dev`)
+    /// regardless of this list.
+    #[serde(default)]
+    pub hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -83,6 +87,28 @@ impl UpConfig {
                 Some(Locator::field("project")),
             ));
         }
+        let mut seen_hosts: BTreeMap<String, &str> = BTreeMap::new();
+        for (svc_name, svc) in &self.service {
+            for host in svc.hosts.iter().flatten() {
+                if let Some(reason) = invalid_base_domain_host(host) {
+                    return Err(err(
+                        reason,
+                        Some(Locator::substring(&format!("\"{host}\""))),
+                    ));
+                }
+                // A host binds to exactly one service; the same host under two
+                // services would 409 at link time, so reject it up front.
+                let key = host.trim_end_matches('.').to_ascii_lowercase();
+                if let Some(first) = seen_hosts.insert(key, svc_name) {
+                    return Err(err(
+                        format!(
+                            "host {host:?} is bound to multiple services ({first:?} and {svc_name:?}); a host can belong to only one service"
+                        ),
+                        Some(Locator::substring(&format!("\"{host}\"")).nth(1)),
+                    ));
+                }
+            }
+        }
         for (name, dep) in &self.deployment {
             if let Some(svc) = &dep.service {
                 if !self.service.contains_key(svc) {
@@ -104,6 +130,33 @@ impl UpConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// The platform base domain. Custom hosts under it are served by a wildcard
+/// certificate and, to avoid colliding with derived base hosts
+/// (`{name}-{slug}.unisrv.dev`, which always contain a hyphen), must be a
+/// single label of lowercase letters and digits — no hyphens, no subdomains.
+const BASE_DOMAIN: &str = "unisrv.dev";
+
+/// Returns an error message if `host` is an invalid custom host under the
+/// platform base domain, else `None`. Mirrors the server's base-label rule so
+/// the CLI fails fast with a source span instead of waiting for a claim 400.
+/// Hosts off the base domain are not checked here (hyphens etc. are fine).
+fn invalid_base_domain_host(host: &str) -> Option<String> {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let label = normalized.strip_suffix(&format!(".{BASE_DOMAIN}"))?;
+    let single_label_ok = !label.is_empty()
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if single_label_ok {
+        None
+    } else {
+        Some(format!(
+            "host {host:?} is not a valid custom {BASE_DOMAIN} host: it must be a single label of \
+             lowercase letters and digits with no hyphens or subdomains (e.g. \"myapp.{BASE_DOMAIN}\")"
+        ))
     }
 }
 
@@ -168,7 +221,7 @@ mod tests {
 project = "nginx-demo"
 
 service "nginx" {
-  host = "nginx.unisrv.dev"
+  hosts = ["nginx.unisrv.dev"]
 }
 
 deployment "nginx" {
@@ -182,7 +235,10 @@ deployment "nginx" {
         let cfg = UpConfig::parse(src).unwrap();
         assert_eq!(cfg.project, "nginx-demo");
         assert_eq!(cfg.service.len(), 1);
-        assert_eq!(cfg.service["nginx"].host, "nginx.unisrv.dev");
+        assert_eq!(
+            cfg.service["nginx"].hosts.as_deref(),
+            Some(["nginx.unisrv.dev".to_string()].as_slice())
+        );
 
         let dep = &cfg.deployment["nginx"];
         assert_eq!(dep.service.as_deref(), Some("nginx"));
@@ -190,6 +246,101 @@ deployment "nginx" {
         assert_eq!(dep.container.image, "nginx");
         assert!(dep.container.args.is_none());
         assert!(dep.container.env.is_none());
+    }
+
+    #[test]
+    fn parses_bare_service_block_without_hosts() {
+        let src = r#"
+project = "demo"
+service "web" {}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert_eq!(cfg.service.len(), 1);
+        assert!(cfg.service["web"].hosts.is_none());
+    }
+
+    #[test]
+    fn rejects_legacy_host_field() {
+        // `host` was replaced by `hosts`. Pre-alpha: a plain unknown-field
+        // rejection (which still names `host`) is enough — no migration hint.
+        let src = r#"
+project = "demo"
+service "web" {
+  host = "web.example.com"
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("host"),
+            "should name the rejected field: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_hyphenated_base_domain_host() {
+        let src = r#"
+project = "demo"
+service "web" { hosts = ["my-app.unisrv.dev"] }
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("my-app.unisrv.dev"),
+            "should name the host: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_nested_base_domain_host() {
+        let src = r#"
+project = "demo"
+service "web" { hosts = ["a.b.unisrv.dev"] }
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        assert!(format!("{err:#}").contains("a.b.unisrv.dev"));
+    }
+
+    #[test]
+    fn accepts_single_label_base_domain_and_external_hyphens() {
+        // Single-label *.unisrv.dev is fine; hyphens are fine OFF the base domain.
+        let src = r#"
+project = "demo"
+service "web" { hosts = ["myapp.unisrv.dev", "my-app.example.com"] }
+"#;
+        assert!(UpConfig::parse(src).is_ok());
+    }
+
+    #[test]
+    fn rejects_same_host_bound_to_two_services() {
+        // A host binds to exactly one service (the server 409s on a second
+        // link), so the same host under two service blocks is a config error.
+        let src = r#"
+project = "demo"
+service "web" { hosts = ["shared.example.com"] }
+service "api" { hosts = ["shared.example.com"] }
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("shared.example.com"),
+            "should name the host: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_multiple_custom_hosts_in_order() {
+        let src = r#"
+project = "demo"
+service "web" {
+  hosts = ["a.example.com", "b.example.com"]
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert_eq!(
+            cfg.service["web"].hosts.as_deref(),
+            Some(["a.example.com".to_string(), "b.example.com".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -264,7 +415,7 @@ deployment "d" {
     fn rejects_service_bound_deployment_without_port() {
         let src = r#"
 project = "x"
-service "s" { host = "h.example" }
+service "s" {}
 deployment "d" {
   service = "s"
   container { image = "i" }
@@ -285,8 +436,8 @@ deployment "d" {
     fn rejects_duplicate_service_blocks() {
         let src = r#"
 project = "x"
-service "web" { host = "a.example" }
-service "web" { host = "b.example" }
+service "web" {}
+service "web" {}
 "#;
         let err = UpConfig::parse(src).unwrap_err();
         let msg = format!("{err:#}");
@@ -317,7 +468,7 @@ deployment "app" {
     fn rejects_empty_service_label() {
         let src = r#"
 project = "x"
-service "" { host = "a.example" }
+service "" {}
 "#;
         let err = UpConfig::parse(src).unwrap_err();
         let msg = format!("{err:#}");

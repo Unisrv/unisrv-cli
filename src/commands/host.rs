@@ -4,7 +4,7 @@ use chrono_humanize::HumanTime;
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use dialoguer::Confirm;
 use unisrv_api::ApiClient;
-use unisrv_api::models::{ClaimHostRequest, DnsConfigResponse, HostResponse};
+use unisrv_api::models::{CertificateType, ClaimHostRequest, DnsConfigResponse, HostResponse};
 
 pub async fn claim(client: &dyn ApiClient, hostname: &str) -> Result<()> {
     claim_with_confirm(client, hostname, prompt_dns_confirmation)
@@ -49,9 +49,32 @@ where
 {
     let host = client
         .claim_host(ClaimHostRequest {
-            host: hostname.to_string(),
+            // Canonicalize: DNS is case-insensitive and the server stores hosts
+            // verbatim, so claim the same spelling `up` will link/compare against.
+            host: normalize_host(hostname),
         })
         .await?;
+
+    // Base-domain (`*.unisrv.dev`) hosts are served by the platform wildcard
+    // certificate; the claim stamps `common_wildcard` and that is sufficient (a
+    // per-host cert request would 400). Verify the stamp actually landed before
+    // reporting success — otherwise we'd claim success on a cert-less host that
+    // preflight would then reject.
+    if is_unisrv_managed_domain(&host.host) {
+        if host.certificate_type == Some(CertificateType::CommonWildcard) {
+            println!(
+                "\u{2713} Claimed {}. Served by the platform wildcard certificate.",
+                host.host
+            );
+            return Ok(host);
+        }
+        return Err(anyhow::anyhow!(
+            "claimed {} but the platform did not stamp a wildcard certificate (got {:?}); \
+             a base-domain host cannot use a per-host certificate",
+            host.host,
+            host.certificate_type
+        ));
+    }
 
     if cert_in_lockout(&host, chrono::Utc::now().naive_utc()) {
         let valid_until = host
@@ -64,10 +87,11 @@ where
         return Ok(host);
     }
 
+    // Managed (`*.unisrv.dev`) hosts already returned above, so everything from
+    // here is an external host that needs DNS set up before a per-host cert.
     let cert_exists = host.certificate_valid_until.is_some();
-    let dns_preconfigured = is_unisrv_managed_domain(&host.host);
 
-    if !cert_exists && !dns_preconfigured {
+    if !cert_exists {
         let dns = client.get_hosts_dns_config().await?;
         print_dns_records(&host.host, &dns);
 
@@ -162,7 +186,7 @@ fn render_table(hosts: &[HostResponse], now: NaiveDateTime, use_color: bool) -> 
     ]);
 
     for host in hosts {
-        let (cert_text, cert_color) = format_cert_type(host.certificate_type.as_deref());
+        let (cert_text, cert_color) = format_cert_type(host.certificate_type);
         let (expires_text, expires_color) = format_expires(host.certificate_valid_until, now);
         let (attached_text, attached_color) = format_attached(host.service_id.is_some());
         let created = format_relative(host.created_at, now);
@@ -186,11 +210,13 @@ fn cell_with_color(text: String, color: Option<Color>, use_color: bool) -> Cell 
     }
 }
 
-fn format_cert_type(cert_type: Option<&str>) -> (String, Option<Color>) {
+fn format_cert_type(cert_type: Option<CertificateType>) -> (String, Option<Color>) {
     match cert_type {
         None => ("\u{2014}".into(), Some(Color::DarkGrey)),
-        Some("LetsEncrypt") => ("LE".into(), None),
-        Some(other) => (other.to_string(), None),
+        Some(CertificateType::CommonWildcard) => ("wildcard".into(), None),
+        Some(CertificateType::LetsEncrypt) => ("LE".into(), None),
+        Some(CertificateType::Custom) => ("custom".into(), None),
+        Some(CertificateType::Unknown) => ("?".into(), Some(Color::DarkGrey)),
     }
 }
 
@@ -264,7 +290,7 @@ mod tests {
             host: "example.com".into(),
             user_id: user_id(),
             service_id: None,
-            certificate_type: Some("LetsEncrypt".into()),
+            certificate_type: Some(CertificateType::LetsEncrypt),
             certificate_valid_until: Some(valid_until),
             created_at: issued_at,
             updated_at: issued_at,
@@ -293,6 +319,17 @@ mod tests {
         assert_eq!(calls.claim_host_calls[0].host, "example.com");
         assert_eq!(calls.get_hosts_dns_config_calls, 1);
         assert_eq!(calls.request_host_cert_calls, vec![host_id()]);
+    }
+
+    #[tokio::test]
+    async fn claim_normalizes_hostname_before_sending() {
+        // DNS is case-insensitive and FQDNs may carry a trailing dot; the server
+        // stores hosts verbatim. Canonicalize so a claim matches what `up` links
+        // (and so an uppercase *.unisrv.dev label doesn't 400 at claim).
+        let mock = MockApiClient::logged_in().with_claim_host(Ok(provisioned_host(1, 90)));
+        let _ = claim_with_confirm(&mock, "Example.COM.", || Ok(true)).await;
+        let calls = mock.calls.lock().unwrap();
+        assert_eq!(calls.claim_host_calls[0].host, "example.com");
     }
 
     #[tokio::test]
@@ -329,15 +366,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unisrv_dev_domain_skips_dns_prompt() {
-        let mut new_host = unprovisioned_host();
-        new_host.host = "demo.unisrv.dev".into();
-        let mut provisioned = provisioned_host(0, 90);
-        provisioned.host = "demo.unisrv.dev".into();
+    async fn unisrv_dev_domain_claims_without_cert_request() {
+        // Base-domain hosts are served by the platform wildcard certificate:
+        // claiming stamps `common_wildcard` and is sufficient. Requesting a
+        // per-host cert would 400, so the claim flow must skip it (and the DNS
+        // prompt) entirely.
+        let mut claimed = unprovisioned_host();
+        claimed.host = "demo.unisrv.dev".into();
+        claimed.certificate_type = Some(CertificateType::CommonWildcard);
 
-        let mock = MockApiClient::logged_in()
-            .with_claim_host(Ok(new_host))
-            .with_request_host_cert(Ok(provisioned));
+        let mock = MockApiClient::logged_in().with_claim_host(Ok(claimed));
 
         let result = claim_with_confirm(&mock, "demo.unisrv.dev", || {
             panic!("DNS prompt should be skipped for unisrv.dev subdomains")
@@ -346,8 +384,40 @@ mod tests {
         assert!(result.is_ok(), "expected ok, got {result:?}");
 
         let calls = mock.calls.lock().unwrap();
+        assert_eq!(calls.claim_host_calls.len(), 1);
         assert_eq!(calls.get_hosts_dns_config_calls, 0);
-        assert_eq!(calls.request_host_cert_calls, vec![host_id()]);
+        assert!(
+            calls.request_host_cert_calls.is_empty(),
+            "base-domain host must not request a per-host cert"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_host_without_wildcard_cert_errors_instead_of_false_success() {
+        // The early-return success path must verify the backend actually stamped
+        // the wildcard cert. If it didn't (cert_type None/other), don't claim
+        // success — error clearly, and never request a doomed per-host cert.
+        let mut claimed = unprovisioned_host(); // certificate_type: None
+        claimed.host = "demo.unisrv.dev".into();
+        let mock = MockApiClient::logged_in().with_claim_host(Ok(claimed));
+
+        let err = claim_with_confirm(&mock, "demo.unisrv.dev", || {
+            panic!("DNS prompt should be skipped for unisrv.dev subdomains")
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("wildcard"),
+            "expected a wildcard-cert error, got: {err}"
+        );
+        assert!(
+            mock.calls
+                .lock()
+                .unwrap()
+                .request_host_cert_calls
+                .is_empty(),
+            "must not request a per-host cert for a base-domain host"
+        );
     }
 
     #[test]
@@ -490,7 +560,7 @@ mod tests {
 
     fn host_with(
         name: &str,
-        cert_type: Option<&str>,
+        cert_type: Option<CertificateType>,
         valid_until: Option<NaiveDateTime>,
         attached: bool,
         created_at: NaiveDateTime,
@@ -500,7 +570,7 @@ mod tests {
             host: name.into(),
             user_id: user_id(),
             service_id: attached.then(Uuid::new_v4),
-            certificate_type: cert_type.map(str::to_string),
+            certificate_type: cert_type,
             certificate_valid_until: valid_until,
             created_at,
             updated_at: created_at,
@@ -539,21 +609,21 @@ mod tests {
         let hosts = vec![
             host_with(
                 "healthy.example.com",
-                Some("LetsEncrypt"),
+                Some(CertificateType::LetsEncrypt),
                 Some(now + Duration::days(73)),
                 true,
                 now - Duration::days(3),
             ),
             host_with(
                 "expiring.example.com",
-                Some("LetsEncrypt"),
+                Some(CertificateType::LetsEncrypt),
                 Some(now + Duration::days(12)),
                 false,
                 now - Duration::hours(1),
             ),
             host_with(
                 "expired.example.com",
-                Some("LetsEncrypt"),
+                Some(CertificateType::LetsEncrypt),
                 Some(now - Duration::days(4)),
                 false,
                 now - Duration::days(92),
@@ -607,12 +677,15 @@ mod tests {
         assert_eq!(text, "\u{2014}");
         assert_eq!(color, Some(Color::DarkGrey));
 
-        let (text, color) = format_cert_type(Some("LetsEncrypt"));
+        let (text, color) = format_cert_type(Some(CertificateType::LetsEncrypt));
         assert_eq!(text, "LE");
         assert_eq!(color, None);
 
-        let (text, _) = format_cert_type(Some("SelfSigned"));
-        assert_eq!(text, "SelfSigned");
+        let (text, _) = format_cert_type(Some(CertificateType::CommonWildcard));
+        assert_eq!(text, "wildcard");
+
+        let (text, _) = format_cert_type(Some(CertificateType::Custom));
+        assert_eq!(text, "custom");
     }
 
     #[test]

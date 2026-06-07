@@ -57,10 +57,18 @@ pub trait ApiClient: Send + Sync {
     ) -> Result<CreateInstanceTCPProxyResponse>;
 
     // ── Networks ──
-    async fn create_network(&self, req: CreateInternalNetworkRequest) -> Result<NetworkResponse>;
-    async fn delete_network(&self, network_id: Uuid) -> Result<()>;
-    async fn list_networks(&self, include_instance_count: bool) -> Result<NetworkListResponse>;
-    async fn get_network(&self, network_id: Uuid) -> Result<NetworkResponse>;
+    async fn create_network(
+        &self,
+        env_id: Uuid,
+        req: CreateInternalNetworkRequest,
+    ) -> Result<NetworkResponse>;
+    async fn delete_network(&self, env_id: Uuid, network_id: Uuid) -> Result<()>;
+    async fn list_networks(
+        &self,
+        env_id: Uuid,
+        include_instance_count: bool,
+    ) -> Result<NetworkListResponse>;
+    async fn get_network(&self, env_id: Uuid, network_id: Uuid) -> Result<NetworkResponse>;
 
     // ── Services ──
     async fn provision_service(
@@ -96,6 +104,10 @@ pub trait ApiClient: Send + Sync {
     async fn delete_host(&self, id: Uuid) -> Result<()>;
     async fn request_host_cert(&self, id: Uuid) -> Result<HostResponse>;
     async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse>;
+    /// Link a claimed host to a service (PUT /hosts/{id}/service/{service_id}).
+    async fn link_host_to_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse>;
+    /// Unlink a host from a service (DELETE /hosts/{id}/service/{service_id}).
+    async fn unlink_host_from_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse>;
 
     // ── Deployments ──
     async fn create_deployment(
@@ -275,6 +287,24 @@ impl HttpApiClient {
         Ok(())
     }
 
+    /// PUT with no request body, parsing the JSON response.
+    async fn put_for_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(self
+            .send(self.client.put(self.url(path)))
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// DELETE with no request body, parsing the JSON response.
+    async fn delete_for_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(self
+            .send(self.client.delete(self.url(path)))
+            .await?
+            .json()
+            .await?)
+    }
+
     async fn delete_req(&self, path: &str) -> Result<()> {
         self.send(self.client.delete(self.url(path))).await?;
         Ok(())
@@ -414,25 +444,36 @@ impl ApiClient for HttpApiClient {
 
     // ── Networks ──
 
-    async fn create_network(&self, req: CreateInternalNetworkRequest) -> Result<NetworkResponse> {
-        self.post("/network", &req).await
+    async fn create_network(
+        &self,
+        env_id: Uuid,
+        req: CreateInternalNetworkRequest,
+    ) -> Result<NetworkResponse> {
+        self.post(&format!("/environment/{env_id}/network"), &req)
+            .await
     }
 
-    async fn delete_network(&self, network_id: Uuid) -> Result<()> {
-        self.delete_req(&format!("/network/{network_id}")).await
+    async fn delete_network(&self, env_id: Uuid, network_id: Uuid) -> Result<()> {
+        self.delete_req(&format!("/environment/{env_id}/network/{network_id}"))
+            .await
     }
 
-    async fn list_networks(&self, include_instance_count: bool) -> Result<NetworkListResponse> {
+    async fn list_networks(
+        &self,
+        env_id: Uuid,
+        include_instance_count: bool,
+    ) -> Result<NetworkListResponse> {
         let path = if include_instance_count {
-            "/networks?include_instance_count=true".to_string()
+            format!("/environment/{env_id}/networks?include_instance_count=true")
         } else {
-            "/networks".to_string()
+            format!("/environment/{env_id}/networks")
         };
         self.get(&path).await
     }
 
-    async fn get_network(&self, network_id: Uuid) -> Result<NetworkResponse> {
-        self.get(&format!("/network/{network_id}")).await
+    async fn get_network(&self, env_id: Uuid, network_id: Uuid) -> Result<NetworkResponse> {
+        self.get(&format!("/environment/{env_id}/network/{network_id}"))
+            .await
     }
 
     // ── Services ──
@@ -515,6 +556,16 @@ impl ApiClient for HttpApiClient {
 
     async fn get_hosts_dns_config(&self) -> Result<DnsConfigResponse> {
         self.get("/hosts/dns-config").await
+    }
+
+    async fn link_host_to_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse> {
+        self.put_for_json(&format!("/hosts/{id}/service/{service_id}"))
+            .await
+    }
+
+    async fn unlink_host_from_service(&self, id: Uuid, service_id: Uuid) -> Result<HostResponse> {
+        self.delete_for_json(&format!("/hosts/{id}/service/{service_id}"))
+            .await
     }
 
     // ── Deployments ──

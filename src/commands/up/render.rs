@@ -93,7 +93,9 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     styles.add.apply_to("+"),
                     styles.bold.apply_to(&s.name)
                 );
-                let _ = writeln!(out, "      host:   {}", s.host);
+                if !s.hosts.is_empty() {
+                    let _ = writeln!(out, "      hosts:  {}", s.hosts.join(", "));
+                }
                 let _ = writeln!(out, "      region: {}", s.region);
             }
             ServiceAction::Update {
@@ -127,8 +129,13 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                         .dim
                         .apply_to(format!("(recreate — {})", format_reasons(reasons)))
                 );
-                if current.host != desired.host {
-                    let _ = writeln!(out, "      host:   {} -> {}", current.host, desired.host);
+                if diff::service::hosts_differ(desired, current) {
+                    let _ = writeln!(
+                        out,
+                        "      hosts:  {} -> {}",
+                        current.hosts.join(", "),
+                        desired.hosts.join(", ")
+                    );
                 }
                 if current.region != desired.region {
                     let _ = writeln!(
@@ -145,7 +152,11 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     "  {} service {} {}",
                     styles.destroy.apply_to("-"),
                     styles.bold.apply_to(&s.name),
-                    styles.dim.apply_to(format!("(host: {})", s.host))
+                    styles.dim.apply_to(if s.hosts.is_empty() {
+                        "(base host only)".to_string()
+                    } else {
+                        format!("(hosts: {})", s.hosts.join(", "))
+                    })
                 );
             }
         }
@@ -258,6 +269,32 @@ fn format_reasons(reasons: &[RecreateReason]) -> String {
         .join(", ")
 }
 
+/// A service's reachable hosts after `up`: the always-live derived base host
+/// plus any bound custom hosts.
+pub struct Reachability {
+    pub service: String,
+    pub base_host: String,
+    pub custom_hosts: Vec<String>,
+}
+
+/// Renders the post-`up` reachability summary: every service's base host
+/// (immediately live via the wildcard cert) and its custom hosts as URLs.
+pub fn render_reachability(services: &[Reachability]) -> String {
+    let mut out = String::new();
+    if services.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "\nReachable:");
+    for svc in services {
+        let _ = writeln!(out, "  {}", svc.service);
+        let _ = writeln!(out, "      https://{}   (base)", svc.base_host);
+        for host in &svc.custom_hosts {
+            let _ = writeln!(out, "      https://{host}   (custom)");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,7 +349,7 @@ mod tests {
             }),
             service_actions: vec![ServiceAction::Create(DesiredService {
                 name: "web".into(),
-                host: "web.example".into(),
+                hosts: vec!["web.example".into()],
                 region: "dev".into(),
                 configuration: http_config(),
             })],
@@ -342,25 +379,26 @@ mod tests {
                 id: Uuid::new_v4(),
                 name: "prod".into(),
                 project: "demo".into(),
+                slug: "ab12".into(),
             }),
             service_actions: vec![ServiceAction::Recreate {
                 current: CurrentService {
                     id: Uuid::new_v4(),
                     name: "web".into(),
-                    host: "old.example".into(),
+                    hosts: vec!["app.example".into()],
                     region: "dev".into(),
                     configuration: http_config(),
                 },
                 desired: DesiredService {
                     name: "web".into(),
-                    host: "new.example".into(),
-                    region: "dev".into(),
+                    hosts: vec!["app.example".into()],
+                    region: "us-east".into(),
                     configuration: http_config(),
                 },
                 reasons: vec![RecreateReason::ImmutableField {
-                    field: "host",
-                    old: "old.example".into(),
-                    new: "new.example".into(),
+                    field: "region",
+                    old: "dev".into(),
+                    new: "us-east".into(),
                 }],
             }],
             deployment_actions: vec![],
@@ -368,9 +406,51 @@ mod tests {
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(out.contains("-/+ service web"));
-        assert!(out.contains("host changed"));
-        assert!(out.contains("old.example -> new.example"));
+        assert!(out.contains("region changed"));
+        assert!(out.contains("dev -> us-east"));
         assert!(out.contains("0 to add, 0 to change, 1 to recreate, 0 to destroy."));
+    }
+
+    #[test]
+    fn recreate_omits_hosts_diff_when_sets_equal_but_reordered() {
+        // Hosts are an unordered set. A recreate triggered by region change with
+        // the same hosts in a different order must NOT render a spurious hosts diff.
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
+                id: Uuid::new_v4(),
+                name: "prod".into(),
+                project: "demo".into(),
+                slug: "ab12".into(),
+            }),
+            service_actions: vec![ServiceAction::Recreate {
+                current: CurrentService {
+                    id: Uuid::new_v4(),
+                    name: "web".into(),
+                    hosts: vec!["b.com".into(), "a.com".into()],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+                desired: DesiredService {
+                    name: "web".into(),
+                    hosts: vec!["a.com".into(), "b.com".into()],
+                    region: "us-east".into(),
+                    configuration: http_config(),
+                },
+                reasons: vec![RecreateReason::ImmutableField {
+                    field: "region",
+                    old: "dev".into(),
+                    new: "us-east".into(),
+                }],
+            }],
+            deployment_actions: vec![],
+            existing_service_ids: BTreeMap::new(),
+        };
+        let out = render(&plan, &PlanStyles::plain());
+        assert!(
+            !out.contains("hosts:"),
+            "reordered-equal host sets must not render a hosts diff:\n{out}"
+        );
     }
 
     #[test]
@@ -381,6 +461,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 name: "prod".into(),
                 project: "demo".into(),
+                slug: "ab12".into(),
             }),
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Delete(
@@ -417,6 +498,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 name: "prod".into(),
                 project: "demo".into(),
+                slug: "ab12".into(),
             }),
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Update {
@@ -440,5 +522,24 @@ mod tests {
         assert!(out.contains("image:    nginx:1 -> nginx:2"));
         assert!(out.contains("replicas: 1 -> 3"));
         assert!(out.contains("0 to add, 1 to change, 0 to recreate, 0 to destroy."));
+    }
+
+    #[test]
+    fn render_reachability_lists_base_and_custom_hosts() {
+        let out = render_reachability(&[Reachability {
+            service: "web".into(),
+            base_host: "web-ab12.unisrv.dev".into(),
+            custom_hosts: vec!["shop.acme.com".into()],
+        }]);
+        assert!(out.contains("web"));
+        assert!(out.contains("https://web-ab12.unisrv.dev"));
+        assert!(out.contains("(base)"));
+        assert!(out.contains("https://shop.acme.com"));
+        assert!(out.contains("(custom)"));
+    }
+
+    #[test]
+    fn render_reachability_empty_is_blank() {
+        assert_eq!(render_reachability(&[]), "");
     }
 }
