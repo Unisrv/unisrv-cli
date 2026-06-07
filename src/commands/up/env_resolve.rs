@@ -18,6 +18,7 @@ use unisrv_api::models::{CreateEnvironmentRequest, EnvironmentListEntry};
 
 use super::defaults::{DEFAULT_ENV_NAME, default_env_display_name};
 use super::plan::{EnvAction, ResolvedEnvironment};
+use crate::progress::{Icon, Progress};
 
 /// Abstraction over user prompting for env metadata. Production uses a
 /// dialoguer-backed impl; tests inject scripted answers.
@@ -34,8 +35,13 @@ pub async fn resolve(
     project: &str,
     env_flag: Option<&str>,
     prompter: &dyn Prompter,
+    progress: &dyn Progress,
 ) -> Result<EnvAction> {
+    // Scope the spinner to the network call only — it's cleared before any
+    // interactive create-env prompt, so animation never collides with input.
+    let step = progress.step(Icon::Lookup, "Resolving environment");
     let envs = client.list_environments().await?;
+    step.clear();
     let matching: Vec<EnvironmentListEntry> = envs
         .environments
         .into_iter()
@@ -102,6 +108,8 @@ mod tests {
     use unisrv_api::test_support::MockApiClient;
     use uuid::Uuid;
 
+    use crate::progress::SilentProgress;
+
     /// Scripted prompter: returns answers in order they're requested.
     struct ScriptedPrompter {
         strings: RefCell<Vec<String>>,
@@ -164,7 +172,9 @@ mod tests {
                 environments: vec![entry("prod", "demo")],
             }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
-        let action = resolve(&client, "demo", None, &prompter).await.unwrap();
+        let action = resolve(&client, "demo", None, &prompter, &SilentProgress)
+            .await
+            .unwrap();
         assert!(matches!(action, EnvAction::Use(e) if e.name == "prod"));
     }
 
@@ -176,13 +186,13 @@ mod tests {
             }));
         // Empty answers → defaults kick in.
         let prompter = ScriptedPrompter::new(vec!["", ""], vec![None]);
-        let action = resolve(&client, "nginx-demo", None, &prompter)
+        let action = resolve(&client, "nginx-demo", None, &prompter, &SilentProgress)
             .await
             .unwrap();
         match action {
             EnvAction::Create(req) => {
-                assert_eq!(req.name, "prod");
-                assert_eq!(req.display_name.as_deref(), Some("nginx-demo Production"));
+                assert_eq!(req.name, "dev");
+                assert_eq!(req.display_name.as_deref(), Some("nginx-demo Development"));
                 assert_eq!(req.description, None);
                 assert_eq!(req.project, "nginx-demo");
             }
@@ -197,7 +207,9 @@ mod tests {
                 environments: vec![],
             }));
         let prompter = ScriptedPrompter::new(vec!["staging", "Staging Env"], vec![Some("for QA")]);
-        let action = resolve(&client, "demo", None, &prompter).await.unwrap();
+        let action = resolve(&client, "demo", None, &prompter, &SilentProgress)
+            .await
+            .unwrap();
         match action {
             EnvAction::Create(req) => {
                 assert_eq!(req.name, "staging");
@@ -215,7 +227,9 @@ mod tests {
                 environments: vec![entry("prod", "demo"), entry("staging", "demo")],
             }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
-        let err = resolve(&client, "demo", None, &prompter).await.unwrap_err();
+        let err = resolve(&client, "demo", None, &prompter, &SilentProgress)
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("--env"), "msg: {msg}");
         assert!(msg.contains("prod"), "msg: {msg}");
@@ -229,7 +243,7 @@ mod tests {
                 environments: vec![entry("prod", "demo"), entry("staging", "demo")],
             }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
-        let action = resolve(&client, "demo", Some("staging"), &prompter)
+        let action = resolve(&client, "demo", Some("staging"), &prompter, &SilentProgress)
             .await
             .unwrap();
         assert!(matches!(action, EnvAction::Use(e) if e.name == "staging"));
@@ -242,7 +256,7 @@ mod tests {
                 environments: vec![entry("prod", "demo")],
             }));
         let prompter = ScriptedPrompter::new(vec!["", ""], vec![None]);
-        let action = resolve(&client, "demo", Some("staging"), &prompter)
+        let action = resolve(&client, "demo", Some("staging"), &prompter, &SilentProgress)
             .await
             .unwrap();
         match action {
@@ -258,7 +272,9 @@ mod tests {
                 environments: vec![entry("prod", "other"), entry("prod", "demo")],
             }));
         let prompter = ScriptedPrompter::new(vec![], vec![]);
-        let action = resolve(&client, "demo", None, &prompter).await.unwrap();
+        let action = resolve(&client, "demo", None, &prompter, &SilentProgress)
+            .await
+            .unwrap();
         assert!(matches!(action, EnvAction::Use(e) if e.project == "demo"));
     }
 }

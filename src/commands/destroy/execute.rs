@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::commands::up::apply::apply;
 use crate::commands::up::plan::{EnvAction, Plan};
+use crate::progress::{Icon, Progress, Tone};
 
 /// Poll cadence and ceiling for the deployment drain. Bounded so a stuck operator
 /// can't hang the CLI forever — on timeout we error and the user reruns (destroy
@@ -51,6 +52,7 @@ pub async fn destroy_execute(
     client: &dyn ApiClient,
     hosts: &[HostResponse],
     waiter: &dyn Waiter,
+    progress: &dyn Progress,
 ) -> Result<()> {
     let env_id = match &plan.env_action {
         EnvAction::Use(env) => env.id,
@@ -60,14 +62,15 @@ pub async fn destroy_execute(
     };
 
     // Issue all the deletes (deployments → services), reusing up's apply.
-    apply(plan, client, hosts).await?;
+    apply(plan, client, hosts, progress).await?;
 
     // Deployments delete asynchronously; wait for them to drain before the
     // backend will let us remove the (now-empty) environment.
-    poll_deployments_drained(client, env_id, waiter, POLL_MAX_ATTEMPTS).await?;
+    poll_deployments_drained(client, env_id, waiter, POLL_MAX_ATTEMPTS, progress).await?;
 
+    let step = progress.step(Icon::Environment, "Deleting environment");
     client.delete_environment(env_id).await?;
-    println!("  - environment destroyed");
+    step.finish(Tone::Remove, "environment destroyed");
     Ok(())
 }
 
@@ -79,10 +82,14 @@ pub async fn poll_deployments_drained(
     env_id: Uuid,
     waiter: &dyn Waiter,
     max_attempts: usize,
+    progress: &dyn Progress,
 ) -> Result<()> {
-    for _ in 0..max_attempts {
+    let step = progress.step(Icon::Deployment, "Waiting for deployments to drain");
+    for attempt in 0..max_attempts {
         let list = client.list_deployments(env_id).await?;
         if list.deployments.is_empty() {
+            let elapsed = attempt as u64 * POLL_INTERVAL.as_secs();
+            step.finish(Tone::Remove, &format!("deployments drained ({elapsed}s)"));
             return Ok(());
         }
         // Every remaining deployment must be on its way out. A deployment in any
@@ -96,6 +103,11 @@ pub async fn poll_deployments_drained(
                 d.state.0
             );
         }
+        let elapsed = attempt as u64 * POLL_INTERVAL.as_secs();
+        step.update(&format!(
+            "Draining {} deployment(s)… ({elapsed}s)",
+            list.deployments.len()
+        ));
         waiter.sleep(POLL_INTERVAL).await;
     }
     bail!(
@@ -119,6 +131,7 @@ mod tests {
     use crate::commands::up::plan::{
         CurrentDeployment, CurrentService, DeploymentAction, ResolvedEnvironment, ServiceAction,
     };
+    use crate::progress::SilentProgress;
 
     /// Test waiter: records how many times it was asked to sleep, never waits.
     struct CountingWaiter {
@@ -237,7 +250,7 @@ mod tests {
             .push_delete_environment(Ok(()));
         let waiter = CountingWaiter::new();
 
-        destroy_execute(destroy_plan(env_id), &client, &[], &waiter)
+        destroy_execute(destroy_plan(env_id), &client, &[], &waiter, &SilentProgress)
             .await
             .unwrap();
 
@@ -274,7 +287,7 @@ mod tests {
             .with_list_deployments(Ok(empty_deployments()));
         let waiter = CountingWaiter::new();
 
-        poll_deployments_drained(&client, env_id, &waiter, 5)
+        poll_deployments_drained(&client, env_id, &waiter, 5, &SilentProgress)
             .await
             .unwrap();
 
@@ -292,7 +305,7 @@ mod tests {
             .push_delete_environment(Ok(()));
         let waiter = CountingWaiter::new();
 
-        let err = destroy_execute(destroy_plan(env_id), &client, &[], &waiter)
+        let err = destroy_execute(destroy_plan(env_id), &client, &[], &waiter, &SilentProgress)
             .await
             .unwrap_err();
 
@@ -319,7 +332,7 @@ mod tests {
             .with_list_deployments(Ok(deployments_in_state("deleting")));
         let waiter = CountingWaiter::new();
 
-        let err = poll_deployments_drained(&client, env_id, &waiter, 3)
+        let err = poll_deployments_drained(&client, env_id, &waiter, 3, &SilentProgress)
             .await
             .unwrap_err();
 

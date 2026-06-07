@@ -11,6 +11,7 @@ use unisrv_api::models::HostResponse;
 
 use super::desired::DesiredState;
 use crate::commands::host::{is_unisrv_managed_domain, normalize_host, provision_managed_host};
+use crate::progress::{Icon, Progress, Tone};
 
 /// List hosts, auto-claim/provision fixable `*.unisrv.dev` hosts referenced in
 /// the manifest, then validate. Returns the up-to-date host list so the caller
@@ -18,13 +19,16 @@ use crate::commands::host::{is_unisrv_managed_domain, normalize_host, provision_
 pub async fn ensure_hosts_ready(
     client: &dyn ApiClient,
     desired: &DesiredState,
+    progress: &dyn Progress,
 ) -> Result<Vec<HostResponse>> {
     let referenced: BTreeSet<&str> = desired
         .services
         .values()
         .flat_map(|s| s.hosts.iter().map(String::as_str))
         .collect();
+    let step = progress.step(Icon::Host, "Checking hosts");
     let mut hosts = client.list_hosts().await?;
+    step.clear();
     let now = Utc::now().naive_utc();
 
     for host in &referenced {
@@ -34,9 +38,11 @@ pub async fn ensure_hosts_ready(
         if ready || !is_unisrv_managed_domain(host) {
             continue;
         }
+        let step = progress.step(Icon::Host, &format!("Claiming {host}"));
         let provisioned = provision_managed_host(client, host)
             .await
             .with_context(|| format!("failed to claim host {host:?}"))?;
+        step.finish(Tone::Add, &format!("host {host} claimed"));
         match hosts
             .iter_mut()
             .find(|h| normalize_host(&h.host) == normalize_host(&provisioned.host))
@@ -147,6 +153,8 @@ mod tests {
     use unisrv_api::test_support::MockApiClient;
     use uuid::Uuid;
 
+    use crate::progress::SilentProgress;
+
     /// A claimed base-domain host: stamped `common_wildcard` at claim, no expiry.
     fn wildcard_host(host: &str) -> HostResponse {
         let mut h = host_with_cert(host, false);
@@ -209,7 +217,9 @@ mod tests {
             MockApiClient::logged_in().with_list_hosts(Ok(vec![host_with_cert("a.example", true)]));
         let desired = desired_with_hosts(&["a.example"]);
 
-        let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
+        let hosts = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap();
 
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].host, "a.example");
@@ -228,7 +238,9 @@ mod tests {
             .with_list_hosts(Ok(vec![host_with_cert("app.unisrv.dev", true)]));
         let desired = desired_with_hosts(&["App.Unisrv.Dev"]);
 
-        let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
+        let hosts = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap();
         assert_eq!(hosts.len(), 1);
 
         let calls = client.calls.lock().unwrap();
@@ -248,7 +260,9 @@ mod tests {
             .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["test.unisrv.dev"]);
 
-        let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
+        let hosts = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap();
 
         // Returned list reflects the freshly claimed, wildcard-covered host.
         let host = hosts.iter().find(|h| h.host == "test.unisrv.dev").unwrap();
@@ -270,7 +284,9 @@ mod tests {
             .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["test.unisrv.dev"]);
 
-        let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
+        let hosts = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap();
 
         let host = hosts.iter().find(|h| h.host == "test.unisrv.dev").unwrap();
         assert_eq!(host.certificate_type, Some(CertificateType::CommonWildcard));
@@ -286,7 +302,9 @@ mod tests {
         let client = MockApiClient::logged_in().with_list_hosts(Ok(vec![]));
         let desired = desired_with_hosts(&["app.example.com"]);
 
-        let err = ensure_hosts_ready(&client, &desired).await.unwrap_err();
+        let err = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("app.example.com"), "msg: {msg}");
         assert!(msg.contains("unisrv host claim"), "msg: {msg}");
@@ -308,7 +326,9 @@ mod tests {
             }));
         let desired = desired_with_hosts(&["a.unisrv.dev", "b.unisrv.dev"]);
 
-        let err = ensure_hosts_ready(&client, &desired).await.unwrap_err();
+        let err = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("a.unisrv.dev"),
@@ -335,7 +355,9 @@ mod tests {
             deployments: BTreeMap::new(),
         };
 
-        let hosts = ensure_hosts_ready(&client, &desired).await.unwrap();
+        let hosts = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap();
         assert!(hosts.is_empty());
 
         let calls = client.calls.lock().unwrap();
@@ -354,7 +376,9 @@ mod tests {
             .with_claim_host(Ok(wildcard_host("test.unisrv.dev")));
         let desired = desired_with_hosts(&["app.example.com", "test.unisrv.dev"]);
 
-        let err = ensure_hosts_ready(&client, &desired).await.unwrap_err();
+        let err = ensure_hosts_ready(&client, &desired, &SilentProgress)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("app.example.com"),
             "should fail on the custom domain"

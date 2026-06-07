@@ -15,6 +15,7 @@ use super::fetch::fetch_current_state;
 use super::plan::{EnvAction, diff};
 use super::preflight::{ensure_hosts_ready, validate_host_ownership};
 use super::render::{PlanStyles, render};
+use crate::progress::{Icon, Progress, SpinnerProgress};
 
 const CONFIG_FILE: &str = "unisrv.hcl";
 
@@ -26,16 +27,23 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     let config = UpConfig::load(path)?;
     let desired = DesiredState::from_config(config);
 
+    let progress = SpinnerProgress::new();
+
     // Ensures every referenced host is claimed + cert-ready. The returned list
     // is reused by apply for host→id resolution when linking/unlinking.
-    let hosts = ensure_hosts_ready(client, &desired).await?;
+    let hosts = ensure_hosts_ready(client, &desired, &progress).await?;
 
     let prompter = DialoguerPrompter;
-    let env_action = resolve_env(client, &desired.project, env_flag, &prompter).await?;
+    let env_action = resolve_env(client, &desired.project, env_flag, &prompter, &progress).await?;
 
     // If we're creating an env, there is no current state to fetch.
     let current = match &env_action {
-        EnvAction::Use(env) => fetch_current_state(client, env.id).await?,
+        EnvAction::Use(env) => {
+            let step = progress.step(Icon::Lookup, "Fetching current state");
+            let state = fetch_current_state(client, env.id).await?;
+            step.clear();
+            state
+        }
         EnvAction::Create(_) => super::plan::CurrentState::empty(),
     };
 
@@ -47,7 +55,13 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     let plan = diff(&desired, &current, env_action);
 
     if plan.is_empty() {
-        println!("No changes.");
+        // `console` strips the styling when stdout isn't a terminal, so piped
+        // runs still get a clean plain line. Padded with blank lines for room,
+        // and kept understated — only the sparkle carries colour.
+        println!(
+            "\n  ✨ {}\n",
+            console::style("Everything's up to date — nothing to apply.").dim()
+        );
         return Ok(());
     }
 
@@ -68,7 +82,7 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    apply(plan, client, &hosts).await?;
+    apply(plan, client, &hosts, &progress).await?;
     Ok(())
 }
 

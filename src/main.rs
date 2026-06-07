@@ -1,4 +1,5 @@
 mod commands;
+mod progress;
 
 use clap::{Parser, Subcommand};
 use commands::up::parse_error::ConfigParseError;

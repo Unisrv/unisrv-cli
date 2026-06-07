@@ -35,8 +35,14 @@ use super::plan::{
 };
 use super::render::{Reachability, render_reachability};
 use crate::commands::host::normalize_host;
+use crate::progress::{Icon, Progress, Tone};
 
-pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -> Result<()> {
+pub async fn apply(
+    plan: Plan,
+    client: &dyn ApiClient,
+    hosts: &[HostResponse],
+    progress: &dyn Progress,
+) -> Result<()> {
     // Host string → claimed-host id, for resolving link/unlink targets. Hosts
     // are user-global (not env-scoped), so this is just an id dictionary.
     let host_ids: BTreeMap<String, Uuid> = hosts
@@ -95,11 +101,15 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
     let (env_id, env_slug) = match plan.env_action {
         EnvAction::Use(env) => (env.id, env.slug),
         EnvAction::Create(req) => {
+            let step = progress.step(
+                Icon::Environment,
+                &format!("Creating environment {}", req.name),
+            );
             let env = client
                 .create_environment(req.clone())
                 .await
                 .with_context(|| format!("failed to create environment {:?}", req.name))?;
-            println!("  + environment {} created", env.name);
+            step.finish(Tone::Add, &format!("environment {} created", env.name));
             (env.id, env.slug)
         }
     };
@@ -112,33 +122,37 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
 
     // ── Phase 2: create new services ──
     for desired in services.creates {
+        let step = progress.step(Icon::Service, &format!("Creating service {}", desired.name));
         let id = create_service(client, env_id, &desired).await?;
         service_ids.insert(desired.name.clone(), id);
-        println!("  + service {} created", desired.name);
+        step.finish(Tone::Add, &format!("service {} created", desired.name));
     }
 
     // ── Phase 3: update services (config only; skip when config is unchanged
     //    and only the host set differs — hosts are reconciled by link/unlink) ──
     for (id, desired, current) in services.updates {
         if desired.configuration != current.configuration {
+            let step = progress.step(Icon::Service, &format!("Updating service {}", desired.name));
             client
                 .update_service(env_id, id, desired.configuration.clone())
                 .await
                 .with_context(|| format!("failed to update service {:?}", desired.name))?;
-            println!("  ~ service {} updated", desired.name);
+            step.finish(Tone::Change, &format!("service {} updated", desired.name));
         }
     }
 
     // ── Unlink pass: free hosts no longer desired before anything rebinds ──
     for (service_id, to_unlink) in &host_unlinks {
         for host in to_unlink {
+            let step = progress.step(Icon::Host, &format!("Unlinking host {host}"));
             // An unlink target with no claimed-host row (host deleted out-of-band)
             // is already effectively unbound — skip it rather than abort the apply
             // mid-flight. Only links require a resolvable id (preflight guarantees
             // referenced hosts are claimed).
             let Some(host_id) = host_ids.get(&normalize_host(host)).copied() else {
-                eprintln!(
-                    "  ! skipping unlink of {host}: no claimed host found (already removed?)"
+                step.finish(
+                    Tone::Warn,
+                    &format!("skipping unlink of {host}: no claimed host found (already removed?)"),
                 );
                 continue;
             };
@@ -146,38 +160,54 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
                 .unlink_host_from_service(host_id, *service_id)
                 .await
                 .with_context(|| format!("failed to unlink host {host:?}"))?;
-            println!("  - host {host} unlinked");
+            step.finish(Tone::Remove, &format!("host {host} unlinked"));
         }
     }
 
     // ── Phase 4: delete deployments being removed or recreated ──
     for (id, name) in deployments.ids_to_delete() {
+        let step = progress.step(Icon::Deployment, &format!("Deleting deployment {name}"));
         client
             .delete_deployment(env_id, id)
             .await
             .with_context(|| format!("failed to delete deployment {name:?}"))?;
-        println!("  - deployment {name} deleted");
+        step.finish(Tone::Remove, &format!("deployment {name} deleted"));
     }
 
     // ── Phase 5: recreate services (delete then create) ──
     for (current, desired) in services.recreates {
+        let step = progress.step(
+            Icon::Service,
+            &format!("Recreating service {}", desired.name),
+        );
         client
             .delete_service(env_id, current.id)
             .await
             .with_context(|| format!("failed to delete service {:?}", current.name))?;
         let new_id = create_service(client, env_id, &desired).await?;
         service_ids.insert(desired.name.clone(), new_id);
-        println!("  -/+ service {} recreated", desired.name);
+        step.finish(
+            Tone::Recreate,
+            &format!("service {} recreated", desired.name),
+        );
     }
 
     // ── Phase 6: create deployments (new + recreated) ──
     for desired in deployments.drain_for_create() {
+        let step = progress.step(
+            Icon::Deployment,
+            &format!("Creating deployment {}", desired.name),
+        );
         create_deployment(client, env_id, &desired, &service_ids).await?;
-        println!("  + deployment {} created", desired.name);
+        step.finish(Tone::Add, &format!("deployment {} created", desired.name));
     }
 
     // ── Phase 7: update deployments ──
     for (id, desired) in deployments.updates {
+        let step = progress.step(
+            Icon::Deployment,
+            &format!("Updating deployment {}", desired.name),
+        );
         client
             .update_deployment(
                 env_id,
@@ -188,7 +218,10 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
             )
             .await
             .with_context(|| format!("failed to update deployment {:?}", desired.name))?;
-        println!("  ~ deployment {} updated", desired.name);
+        step.finish(
+            Tone::Change,
+            &format!("deployment {} updated", desired.name),
+        );
     }
 
     // ── Phase 8: delete services being removed ──
@@ -201,11 +234,12 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
     // broadly: every host-freeing step (this delete + the unlink pass) precedes
     // every host-binding step (the link pass below). Do not reorder.
     for current in services.deletes {
+        let step = progress.step(Icon::Service, &format!("Deleting service {}", current.name));
         client
             .delete_service(env_id, current.id)
             .await
             .with_context(|| format!("failed to delete service {:?}", current.name))?;
-        println!("  - service {} deleted", current.name);
+        step.finish(Tone::Remove, &format!("service {} deleted", current.name));
     }
 
     // ── Link pass: bind desired hosts to their (now final-id) services ──
@@ -215,11 +249,12 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
         })?;
         for host in to_link {
             let host_id = resolve_host_id(&host_ids, host)?;
+            let step = progress.step(Icon::Host, &format!("Linking host {host}"));
             client
                 .link_host_to_service(host_id, service_id)
                 .await
                 .with_context(|| format!("failed to link host {host:?}"))?;
-            println!("  + host {host} linked");
+            step.finish(Tone::Add, &format!("host {host} linked"));
         }
     }
 
@@ -230,19 +265,13 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
     // time these return the instances are terminal — no polling needed here.
     // `None` request = graceful shutdown with the server default timeout.
     for stop in &instance_stops {
+        let name = stop.name.as_deref().unwrap_or("<unnamed>");
+        let step = progress.step(Icon::Instance, &format!("Stopping instance {name}"));
         client
             .deprovision_instance(env_id, stop.id, None)
             .await
-            .with_context(|| {
-                format!(
-                    "failed to stop instance {}",
-                    stop.name.as_deref().unwrap_or("<unnamed>")
-                )
-            })?;
-        println!(
-            "  - instance {} stopped",
-            stop.name.as_deref().unwrap_or("<unnamed>")
-        );
+            .with_context(|| format!("failed to stop instance {name}"))?;
+        step.finish(Tone::Remove, &format!("instance {name} stopped"));
     }
 
     // Reachability summary: every acted-on service's live base host + customs.
@@ -418,6 +447,7 @@ mod tests {
         CurrentDeployment, CurrentService, CurrentServiceBinding, EnvAction, InstanceStop, Plan,
         RecreateReason, ServiceAction,
     };
+    use crate::progress::SilentProgress;
     use chrono::NaiveDateTime;
     use unisrv_api::models::{
         CreateDeploymentResponse, DeploymentConfiguration, EnvironmentResponse, HTTPLocation,
@@ -469,7 +499,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &hosts).await.unwrap();
+        apply(plan, &client, &hosts, &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.link_host_calls, vec![(h_id, new_svc_id)]);
@@ -520,7 +550,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &hosts).await.unwrap();
+        apply(plan, &client, &hosts, &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         // No explicit unlink (cascade handles the old service's links).
@@ -570,7 +600,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &hosts).await.unwrap();
+        apply(plan, &client, &hosts, &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.unlink_host_calls, vec![(c_id, svc_id)]);
@@ -632,7 +662,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &hosts).await.unwrap();
+        apply(plan, &client, &hosts, &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         let delete_pos = calls.call_order.iter().position(|m| *m == "delete_service");
@@ -683,7 +713,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &hosts).await.unwrap(); // must NOT error
+        apply(plan, &client, &hosts, &SilentProgress).await.unwrap(); // must NOT error
         assert!(client.calls.lock().unwrap().unlink_host_calls.is_empty());
     }
 
@@ -769,7 +799,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.create_environment_calls.len(), 1);
@@ -813,7 +843,7 @@ mod tests {
             }],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.deprovision_instance_calls.len(), 1);
@@ -867,7 +897,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         assert!(
             client
@@ -930,7 +960,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.update_service_calls.len(), 1);
@@ -1004,7 +1034,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         // Old deployment deleted before service recreate.
@@ -1048,7 +1078,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls.delete_deployment_calls.len(), 1);
@@ -1074,7 +1104,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
         let (_env, req) = &calls.create_deployment_calls[0];
@@ -1244,7 +1274,7 @@ mod tests {
             instance_stops: vec![],
         };
 
-        apply(plan, &client, &[]).await.unwrap();
+        apply(plan, &client, &[], &SilentProgress).await.unwrap();
 
         let calls = client.calls.lock().unwrap();
 

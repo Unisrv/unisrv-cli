@@ -19,6 +19,7 @@ use crate::commands::up::desired::DesiredState;
 use crate::commands::up::fetch::fetch_current_state;
 use crate::commands::up::plan::{EnvAction, diff};
 use crate::commands::up::render::{PlanStyles, render};
+use crate::progress::{Icon, Progress, SpinnerProgress};
 
 const CONFIG_FILE: &str = "unisrv.hcl";
 
@@ -30,7 +31,12 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     let config = UpConfig::load(path)?;
     let project = config.project;
 
-    let Some(env) = resolve_for_destroy(client, &project, env_flag).await? else {
+    let progress = SpinnerProgress::new();
+
+    let resolve_step = progress.step(Icon::Lookup, "Resolving environment");
+    let resolved = resolve_for_destroy(client, &project, env_flag).await?;
+    resolve_step.clear();
+    let Some(env) = resolved else {
         println!("Nothing to destroy: no environment found for project {project:?}.");
         return Ok(());
     };
@@ -41,10 +47,14 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
         services: BTreeMap::new(),
         deployments: BTreeMap::new(),
     };
+    let fetch_step = progress.step(Icon::Lookup, "Fetching current state");
     let current = fetch_current_state(client, env.id).await?;
+    fetch_step.clear();
 
     // Standalone instances aren't modelled in the diff; tear them down explicitly.
+    let list_step = progress.step(Icon::Instance, "Listing standalone instances");
     let instances = client.list_instances(env.id).await?;
+    list_step.clear();
     let instance_stops = select_instance_stops(&instances.instances);
 
     let env_name = env.name.clone();
@@ -84,6 +94,6 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
 
     // Destroy never links/unlinks hosts (deletes free them via cascade), so apply
     // needs no claimed-host list.
-    destroy_execute(plan, client, &[], &RealWaiter).await?;
+    destroy_execute(plan, client, &[], &RealWaiter, &progress).await?;
     Ok(())
 }

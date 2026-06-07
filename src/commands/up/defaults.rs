@@ -13,7 +13,7 @@ pub const DEFAULT_TARGET_GROUP: &str = "default";
 pub const DEFAULT_LOCATION_PATH: &str = "/";
 pub const DEFAULT_ALLOW_HTTP: bool = false;
 
-pub const DEFAULT_ENV_NAME: &str = "prod";
+pub const DEFAULT_ENV_NAME: &str = "dev";
 pub fn default_env_display_name(project: &str) -> String {
-    format!("{project} Production")
+    format!("{project} Development")
 }
