@@ -47,6 +47,13 @@ enum Commands {
         #[arg(long)]
         env: Option<String>,
     },
+    /// Destroy the selected environment: delete all its services, deployments,
+    /// standalone instances, and the environment itself
+    Destroy {
+        /// Pin which environment to destroy by name (overrides project lookup)
+        #[arg(long)]
+        env: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +201,7 @@ async fn main() {
             }
         },
         Commands::Up { env } => commands::up::run(client, env.as_deref()).await,
+        Commands::Destroy { env } => commands::destroy::run(client, env.as_deref()).await,
     };
 
     if let Err(err) = result {

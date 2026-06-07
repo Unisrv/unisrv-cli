@@ -87,6 +87,10 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
         })
         .collect();
 
+    // Standalone instances to tear down (destroy only; empty for up). Captured
+    // before the plan's other fields are consumed by partitioning below.
+    let instance_stops = plan.instance_stops;
+
     // ── Phase 1: env ──
     let (env_id, env_slug) = match plan.env_action {
         EnvAction::Use(env) => (env.id, env.slug),
@@ -217,6 +221,28 @@ pub async fn apply(plan: Plan, client: &dyn ApiClient, hosts: &[HostResponse]) -
                 .with_context(|| format!("failed to link host {host:?}"))?;
             println!("  + host {host} linked");
         }
+    }
+
+    // ── Stop pass: deprovision standalone instances (destroy only) ──
+    //
+    // Runs after every service/deployment delete so nothing rebinds to these
+    // instances mid-teardown. Deprovision is synchronous server-side, so by the
+    // time these return the instances are terminal — no polling needed here.
+    // `None` request = graceful shutdown with the server default timeout.
+    for stop in &instance_stops {
+        client
+            .deprovision_instance(env_id, stop.id, None)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to stop instance {}",
+                    stop.name.as_deref().unwrap_or("<unnamed>")
+                )
+            })?;
+        println!(
+            "  - instance {} stopped",
+            stop.name.as_deref().unwrap_or("<unnamed>")
+        );
     }
 
     // Reachability summary: every acted-on service's live base host + customs.
@@ -389,8 +415,8 @@ fn resolve_binding(
 mod tests {
     use super::*;
     use crate::commands::up::plan::{
-        CurrentDeployment, CurrentService, CurrentServiceBinding, EnvAction, Plan, RecreateReason,
-        ServiceAction,
+        CurrentDeployment, CurrentService, CurrentServiceBinding, EnvAction, InstanceStop, Plan,
+        RecreateReason, ServiceAction,
     };
     use chrono::NaiveDateTime;
     use unisrv_api::models::{
@@ -440,6 +466,7 @@ mod tests {
             })],
             deployment_actions: vec![],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &hosts).await.unwrap();
@@ -490,6 +517,7 @@ mod tests {
             }],
             deployment_actions: vec![],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &hosts).await.unwrap();
@@ -539,6 +567,7 @@ mod tests {
             }],
             deployment_actions: vec![],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &hosts).await.unwrap();
@@ -600,6 +629,7 @@ mod tests {
             ],
             deployment_actions: vec![],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &hosts).await.unwrap();
@@ -650,6 +680,7 @@ mod tests {
             }],
             deployment_actions: vec![],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &hosts).await.unwrap(); // must NOT error
@@ -735,6 +766,7 @@ mod tests {
                 }),
             })],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();
@@ -752,6 +784,99 @@ mod tests {
         let binding = dep_req.service.as_ref().unwrap();
         assert_eq!(binding.service_id, svc_id);
         assert_eq!(binding.target_group, "default");
+    }
+
+    #[tokio::test]
+    async fn stops_standalone_instances_after_service_deletes() {
+        // destroy appends instance_stops to the plan; apply must deprovision each
+        // one, and only after the service/deployment deletes (so nothing rebinds).
+        let inst_id = Uuid::new_v4();
+        let client = MockApiClient::logged_in()
+            .push_delete_service(Ok(()))
+            .push_deprovision_instance(Ok(()));
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Delete(CurrentService {
+                id: Uuid::new_v4(),
+                name: "web".into(),
+                hosts: vec![],
+                region: "dev".into(),
+                configuration: http_config(),
+            })],
+            deployment_actions: vec![],
+            existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![InstanceStop {
+                id: inst_id,
+                name: Some("worker-0".into()),
+            }],
+        };
+
+        apply(plan, &client, &[]).await.unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.deprovision_instance_calls.len(), 1);
+        let (_, stopped_id, req) = &calls.deprovision_instance_calls[0];
+        assert_eq!(*stopped_id, inst_id);
+        assert!(req.is_none(), "destroy uses a graceful default shutdown");
+
+        let order = &calls.call_order;
+        let svc = order.iter().rposition(|m| *m == "delete_service").unwrap();
+        let stop = order
+            .iter()
+            .position(|m| *m == "deprovision_instance")
+            .unwrap();
+        assert!(
+            svc < stop,
+            "instance stop must follow service delete: {order:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn up_with_no_instance_stops_makes_zero_deprovision_calls() {
+        // up never populates instance_stops, so apply must not touch instances.
+        let client = MockApiClient::logged_in().push_update_service(Ok(()));
+        let svc_id = Uuid::new_v4();
+        let mut existing = BTreeMap::new();
+        existing.insert("web".to_string(), svc_id);
+        let mut new_cfg = http_config();
+        new_cfg.allow_http = true;
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: use_env(),
+            service_actions: vec![ServiceAction::Update {
+                id: svc_id,
+                desired: DesiredService {
+                    name: "web".into(),
+                    hosts: vec![],
+                    region: "dev".into(),
+                    configuration: new_cfg,
+                },
+                current: CurrentService {
+                    id: svc_id,
+                    name: "web".into(),
+                    hosts: vec![],
+                    region: "dev".into(),
+                    configuration: http_config(),
+                },
+            }],
+            deployment_actions: vec![],
+            existing_service_ids: existing,
+            instance_stops: vec![],
+        };
+
+        apply(plan, &client, &[]).await.unwrap();
+
+        assert!(
+            client
+                .calls
+                .lock()
+                .unwrap()
+                .deprovision_instance_calls
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -802,6 +927,7 @@ mod tests {
                 },
             }],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();
@@ -875,6 +1001,7 @@ mod tests {
                 }],
             }],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();
@@ -918,6 +1045,7 @@ mod tests {
                 service_binding: None,
             })],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();
@@ -943,6 +1071,7 @@ mod tests {
                 service_binding: None,
             })],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();
@@ -1112,6 +1241,7 @@ mod tests {
                 }),
             ],
             existing_service_ids: existing,
+            instance_stops: vec![],
         };
 
         apply(plan, &client, &[]).await.unwrap();

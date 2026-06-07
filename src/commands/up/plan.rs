@@ -72,6 +72,18 @@ pub struct Plan {
     /// Snapshot of existing service IDs by name, for apply to look up bindings
     /// to services that aren't being acted on (unchanged) or were recreated.
     pub existing_service_ids: BTreeMap<String, Uuid>,
+    /// Instances to deprovision directly (not via a deployment). Always empty for
+    /// `up` — only `destroy` appends standalone instances here. Applied as a no-op
+    /// when empty, so `up` stays instance-unaware.
+    pub instance_stops: Vec<InstanceStop>,
+}
+
+/// A standalone instance (one with no owning deployment) to be torn down. Carries
+/// just enough to call `deprovision_instance` and render a line for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceStop {
+    pub id: Uuid,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -272,6 +284,8 @@ pub fn diff(desired: &DesiredState, current: &CurrentState, env_action: EnvActio
         service_actions,
         deployment_actions,
         existing_service_ids,
+        // diff is instance-unaware; destroy appends stops to the plan afterwards.
+        instance_stops: Vec::new(),
     }
 }
 

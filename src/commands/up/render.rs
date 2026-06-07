@@ -362,6 +362,7 @@ mod tests {
                 }),
             })],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(out.contains("+ environment prod"));
@@ -403,6 +404,7 @@ mod tests {
             }],
             deployment_actions: vec![],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(out.contains("-/+ service web"));
@@ -445,6 +447,7 @@ mod tests {
             }],
             deployment_actions: vec![],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(
@@ -473,6 +476,7 @@ mod tests {
                 },
             )],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(out.contains("- deployment old"));
@@ -516,6 +520,7 @@ mod tests {
                 },
             }],
             existing_service_ids: BTreeMap::new(),
+            instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
         assert!(out.contains("~ deployment web"));

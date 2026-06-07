@@ -29,6 +29,9 @@ pub struct CallLog {
     pub list_hosts_calls: u32,
     pub list_environments_calls: u32,
     pub create_environment_calls: Vec<CreateEnvironmentRequest>,
+    pub delete_environment_calls: Vec<Uuid>,
+    pub list_instances_calls: Vec<Uuid>,
+    pub deprovision_instance_calls: Vec<(Uuid, Uuid, Option<InstanceDeprovisionRequest>)>,
     pub list_services_calls: Vec<Uuid>,
     pub get_service_calls: Vec<(Uuid, Uuid)>,
     pub list_deployments_calls: Vec<Uuid>,
@@ -80,10 +83,17 @@ pub struct MockApiClient {
     pub list_hosts_response: ResponseSlot<Vec<HostResponse>>,
     pub list_environments_response: ResponseSlot<EnvironmentListResponse>,
     pub create_environment_response: ResponseSlot<EnvironmentResponse>,
+    pub delete_environment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub list_instances_responses:
+        Mutex<VecDeque<std::result::Result<InstanceListResponse, ApiError>>>,
+    pub deprovision_instance_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub list_services_response: ResponseSlot<ServiceListResponse>,
     pub get_service_responses:
         Mutex<VecDeque<std::result::Result<ServiceDetailResponse, ApiError>>>,
-    pub list_deployments_response: ResponseSlot<DeploymentListResponse>,
+    /// Queue of responses popped FIFO by each `list_deployments` call. A queue
+    /// (not a one-shot slot) because `destroy`'s drain poll lists repeatedly.
+    pub list_deployments_responses:
+        Mutex<VecDeque<std::result::Result<DeploymentListResponse, ApiError>>>,
     pub get_deployment_responses:
         Mutex<VecDeque<std::result::Result<DeploymentDetailResponse, ApiError>>>,
     pub provision_service_responses:
@@ -116,9 +126,12 @@ impl Default for MockApiClient {
             list_hosts_response: ResponseSlot::default(),
             list_environments_response: ResponseSlot::default(),
             create_environment_response: ResponseSlot::default(),
+            delete_environment_responses: Mutex::new(VecDeque::new()),
+            list_instances_responses: Mutex::new(VecDeque::new()),
+            deprovision_instance_responses: Mutex::new(VecDeque::new()),
             list_services_response: ResponseSlot::default(),
             get_service_responses: Mutex::new(VecDeque::new()),
-            list_deployments_response: ResponseSlot::default(),
+            list_deployments_responses: Mutex::new(VecDeque::new()),
             get_deployment_responses: Mutex::new(VecDeque::new()),
             provision_service_responses: Mutex::new(VecDeque::new()),
             create_deployment_responses: Mutex::new(VecDeque::new()),
@@ -215,11 +228,43 @@ impl MockApiClient {
         self
     }
 
+    /// Queue one `list_deployments` response. Each call pops the next, so chain
+    /// multiple to script a drain sequence (e.g. non-empty, non-empty, empty).
     pub fn with_list_deployments(
         self,
         resp: std::result::Result<DeploymentListResponse, ApiError>,
     ) -> Self {
-        self.list_deployments_response.set(resp);
+        self.list_deployments_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_delete_environment(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.delete_environment_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn with_list_instances(
+        self,
+        resp: std::result::Result<InstanceListResponse, ApiError>,
+    ) -> Self {
+        self.list_instances_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_deprovision_instance(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.deprovision_instance_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
         self
     }
 
@@ -412,8 +457,17 @@ impl ApiClient for MockApiClient {
     ) -> Result<EnvironmentResponse> {
         unimplemented!()
     }
-    async fn delete_environment(&self, _: Uuid) -> Result<()> {
-        unimplemented!()
+    async fn delete_environment(&self, id: Uuid) -> Result<()> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("delete_environment");
+            calls.delete_environment_calls.push(id);
+        }
+        self.delete_environment_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Ok(()))
     }
     async fn provision_instance(
         &self,
@@ -424,11 +478,22 @@ impl ApiClient for MockApiClient {
     }
     async fn deprovision_instance(
         &self,
-        _: Uuid,
-        _: Uuid,
-        _: Option<InstanceDeprovisionRequest>,
+        env_id: Uuid,
+        instance_id: Uuid,
+        req: Option<InstanceDeprovisionRequest>,
     ) -> Result<()> {
-        unimplemented!()
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("deprovision_instance");
+            calls
+                .deprovision_instance_calls
+                .push((env_id, instance_id, req));
+        }
+        self.deprovision_instance_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Ok(()))
     }
     async fn get_instance(
         &self,
@@ -439,8 +504,17 @@ impl ApiClient for MockApiClient {
     ) -> Result<InstanceDetailResponse> {
         unimplemented!()
     }
-    async fn list_instances(&self, _: Uuid) -> Result<InstanceListResponse> {
-        unimplemented!()
+    async fn list_instances(&self, env_id: Uuid) -> Result<InstanceListResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_instances");
+            calls.list_instances_calls.push(env_id);
+        }
+        self.list_instances_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("list_instances_response not configured"))
     }
     async fn get_instance_logs(&self, _: Uuid, _: Uuid) -> Result<Vec<LogMessage>> {
         unimplemented!()
@@ -627,8 +701,11 @@ impl ApiClient for MockApiClient {
             calls.call_order.push("list_deployments");
             calls.list_deployments_calls.push(env_id);
         }
-        self.list_deployments_response
-            .take("list_deployments_response")
+        self.list_deployments_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("list_deployments_response not configured"))
     }
     async fn get_deployment(
         &self,
