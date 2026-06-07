@@ -1,8 +1,6 @@
-project = "nginx-demo"
+project = "nginx"
 
-service "nginx" {
-  host = "nginx.unisrv.dev"
-}
+service "nginx" {}
 
 deployment "nginx" {
   service = "nginx"

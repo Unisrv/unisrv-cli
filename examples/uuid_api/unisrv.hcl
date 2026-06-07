@@ -1,7 +1,7 @@
 project = "uuid-api"
 
 service "uuid" {
-  host = "uuid.unisrv.dev"
+  hosts = ["uuid.unisrv.dev"]
 }
 
 deployment "uuid" {
