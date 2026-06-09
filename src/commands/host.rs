@@ -6,6 +6,8 @@ use dialoguer::Confirm;
 use unisrv_api::ApiClient;
 use unisrv_api::models::{CertificateType, ClaimHostRequest, DnsConfigResponse, HostResponse};
 
+use super::ui::{cell_with_color, colors_enabled, format_relative};
+
 pub async fn claim(client: &dyn ApiClient, hostname: &str) -> Result<()> {
     claim_with_confirm(client, hostname, prompt_dns_confirmation)
         .await
@@ -167,7 +169,7 @@ pub async fn list(client: &dyn ApiClient, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let use_color = console::Term::stdout().features().colors_supported();
+    let use_color = colors_enabled();
     let now = chrono::Utc::now().naive_utc();
     println!("{}", render_table(&hosts, now, use_color));
     Ok(())
@@ -200,14 +202,6 @@ fn render_table(hosts: &[HostResponse], now: NaiveDateTime, use_color: bool) -> 
         ]);
     }
     table.to_string()
-}
-
-fn cell_with_color(text: String, color: Option<Color>, use_color: bool) -> Cell {
-    let cell = Cell::new(text);
-    match (color, use_color) {
-        (Some(c), true) => cell.fg(c),
-        _ => cell,
-    }
 }
 
 fn format_cert_type(cert_type: Option<CertificateType>) -> (String, Option<Color>) {
@@ -244,10 +238,6 @@ fn format_attached(attached: bool) -> (String, Option<Color>) {
     } else {
         ("no".into(), Some(Color::DarkGrey))
     }
-}
-
-fn format_relative(when: NaiveDateTime, now: NaiveDateTime) -> String {
-    HumanTime::from(when - now).to_string()
 }
 
 #[cfg(test)]

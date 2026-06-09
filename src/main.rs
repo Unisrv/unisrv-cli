@@ -1,4 +1,6 @@
 mod commands;
+mod config_locate;
+mod preferences;
 mod progress;
 
 use std::path::PathBuf;
@@ -60,6 +62,42 @@ enum Commands {
     /// standalone instances, and the environment itself
     Destroy {
         /// Pin which environment to destroy by name (overrides project lookup)
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// List and inspect instances in an environment
+    #[command(alias = "i")]
+    Instance {
+        #[command(subcommand)]
+        command: Option<InstanceCommands>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InstanceCommands {
+    /// List instances in the selected environment
+    #[command(alias = "ls")]
+    List {
+        /// Include stopped instances, not just running/provisioning ones
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Target a specific environment by name
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Print an instance's logs, optionally following them live
+    #[command(alias = "log")]
+    Logs {
+        /// Instance UUID, name, or UUID prefix
+        #[arg(value_name = "NAME_OR_UUID")]
+        reference: String,
+        /// Stream new log lines as they arrive (until the instance stops)
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Target a specific environment by name
         #[arg(long)]
         env: Option<String>,
     },
@@ -215,6 +253,32 @@ async fn main() {
             var_files,
         } => commands::up::run(client, env.as_deref(), &vars, &var_files).await,
         Commands::Destroy { env } => commands::destroy::run(client, env.as_deref()).await,
+        Commands::Instance { command } => {
+            use commands::instance::run::{InstanceAction, run};
+            // Bare `unisrv instance` is shorthand for an unfiltered `list`.
+            let command = command.unwrap_or(InstanceCommands::List {
+                all: false,
+                json: false,
+                env: None,
+            });
+            match command {
+                InstanceCommands::List { all, json, env } => {
+                    run(client, env.as_deref(), InstanceAction::List { all, json }).await
+                }
+                InstanceCommands::Logs {
+                    reference,
+                    follow,
+                    env,
+                } => {
+                    run(
+                        client,
+                        env.as_deref(),
+                        InstanceAction::Logs { reference, follow },
+                    )
+                    .await
+                }
+            }
+        }
     };
 
     if let Err(err) = result {

@@ -132,7 +132,7 @@ impl AuthSession {
 // ── Storage ──
 
 fn auth_file_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".unisrv").join("auth.json"))
+    Some(crate::config_dir()?.join("auth.json"))
 }
 
 /// Persistent auth storage that tries keyring first, then falls back to a JSON file.

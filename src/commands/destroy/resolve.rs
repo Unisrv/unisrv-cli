@@ -30,12 +30,12 @@ pub async fn resolve_for_destroy(
         return Ok(matching
             .iter()
             .find(|e| e.name == name)
-            .map(entry_to_resolved));
+            .map(ResolvedEnvironment::from));
     }
 
     match matching.as_slice() {
         [] => Ok(None),
-        [only] => Ok(Some(entry_to_resolved(only))),
+        [only] => Ok(Some(only.into())),
         many => {
             let names: Vec<&str> = many.iter().map(|e| e.name.as_str()).collect();
             bail!(
@@ -43,15 +43,6 @@ pub async fn resolve_for_destroy(
                 names.join(", ")
             )
         }
-    }
-}
-
-fn entry_to_resolved(entry: &EnvironmentListEntry) -> ResolvedEnvironment {
-    ResolvedEnvironment {
-        id: entry.id,
-        name: entry.name.clone(),
-        project: entry.project.clone(),
-        slug: entry.slug.clone(),
     }
 }
 

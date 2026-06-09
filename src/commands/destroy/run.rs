@@ -5,9 +5,8 @@
 //! standalone instances and delete the now-empty environment itself.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use dialoguer::Confirm;
 use unisrv_api::ApiClient;
 
@@ -19,20 +18,18 @@ use crate::commands::up::desired::DesiredState;
 use crate::commands::up::fetch::fetch_current_state;
 use crate::commands::up::plan::{EnvAction, diff};
 use crate::commands::up::render::{PlanStyles, render};
+use crate::config_locate::{CONFIG_FILE, find_config};
 use crate::progress::{Icon, Progress, SpinnerProgress};
 
-const CONFIG_FILE: &str = "unisrv.hcl";
-
 pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
-    let path = Path::new(CONFIG_FILE);
-    if !path.exists() {
-        anyhow::bail!("no {CONFIG_FILE} found in current directory");
-    }
+    let cwd = std::env::current_dir().context("failed to determine the current directory")?;
+    let manifest = find_config(&cwd, CONFIG_FILE)
+        .ok_or_else(|| anyhow!("no {CONFIG_FILE} found in the current directory"))?;
     // Destroy needs only the project name; it intentionally does not evaluate
     // interpolation (and requires no `--var`), since variables don't affect a
     // teardown. `project` must therefore be a literal, which `load_project`
     // reads directly without a variable context.
-    let project = UpConfig::load_project(path)?;
+    let project = UpConfig::load_project(&manifest.path)?;
 
     let progress = SpinnerProgress::new();
 

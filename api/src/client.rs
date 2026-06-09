@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use uuid::Uuid;
 
 use crate::auth::{AuthSession, AuthStore, LoginResponse};
@@ -7,6 +8,11 @@ use crate::models::*;
 
 pub const DEFAULT_API_HOST: &str = "https://api.unisrv.io";
 pub const API_HOST_ENV: &str = "UNISRV_API_HOST";
+
+/// A live stream of log frames. Each item is one parsed [`LogMessage`], or an
+/// error if a frame failed to parse or the transport broke. The stream ends
+/// when the server closes the connection (e.g. the instance stopped).
+pub type LogStream = BoxStream<'static, Result<LogMessage>>;
 
 #[async_trait]
 pub trait ApiClient: Send + Sync {
@@ -49,6 +55,9 @@ pub trait ApiClient: Send + Sync {
     ) -> Result<InstanceDetailResponse>;
     async fn list_instances(&self, env_id: Uuid) -> Result<InstanceListResponse>;
     async fn get_instance_logs(&self, env_id: Uuid, instance_id: Uuid) -> Result<Vec<LogMessage>>;
+    /// Open a live log stream for an instance. The server replays the existing
+    /// log history, then follows new frames until the connection closes.
+    async fn stream_instance_logs(&self, env_id: Uuid, instance_id: Uuid) -> Result<LogStream>;
     async fn create_tcp_proxy(
         &self,
         env_id: Uuid,
@@ -429,6 +438,44 @@ impl ApiClient for HttpApiClient {
         .await
     }
 
+    async fn stream_instance_logs(&self, env_id: Uuid, instance_id: Uuid) -> Result<LogStream> {
+        use futures_util::StreamExt;
+        use reqwest_websocket::RequestBuilderExt;
+
+        // The upgrade request carries auth like any other call, but bypasses the
+        // JSON `send`/`check_response` helpers since the response is a 101 switch.
+        let token = self.ensure_access_token().await?;
+        let url = self.url(&format!(
+            "/environment/{env_id}/instance/{instance_id}/logs/stream"
+        ));
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .upgrade()
+            .send()
+            .await
+            .map_err(|e| ApiError::Other(anyhow::anyhow!("failed to open log stream: {e}")))?;
+        // A non-101 response (401/403/404, …) surfaces here as a handshake error;
+        // translate the status into a clear message instead of a generic upgrade
+        // failure, since the WS path bypasses the JSON `check_response` helper.
+        let websocket = response.into_websocket().await.map_err(map_upgrade_error)?;
+
+        // Classify each frame: text → parsed log, abnormal close → error (so a
+        // server-side failure isn't reported as a clean end), transport break →
+        // error. A normal close ends the stream cleanly.
+        let stream = websocket.filter_map(|message| async move {
+            match message {
+                Ok(frame) => classify_frame(frame),
+                Err(e) => Some(Err(ApiError::Other(anyhow::anyhow!(
+                    "log stream error: {e}"
+                )))),
+            }
+        });
+
+        Ok(stream.boxed())
+    }
+
     async fn create_tcp_proxy(
         &self,
         env_id: Uuid,
@@ -650,5 +697,107 @@ fn registries_path_with_validate(base: &str, validate: bool) -> String {
         format!("{base}?validate=true")
     } else {
         base.to_string()
+    }
+}
+
+/// Turn one WebSocket frame into a log-stream item.
+///
+/// Text frames carry the log JSON. A *normal* close ends the stream cleanly
+/// (`None`). An *abnormal* close becomes an error so a server-side failure isn't
+/// silently reported as a successful end of follow. All other control/binary
+/// frames carry nothing to show and are ignored.
+fn classify_frame(frame: reqwest_websocket::Message) -> Option<Result<LogMessage>> {
+    use reqwest_websocket::{CloseCode, Message};
+    match frame {
+        Message::Text(text) => {
+            Some(serde_json::from_str::<LogMessage>(&text).map_err(ApiError::from))
+        }
+        Message::Close { code, reason } if code != CloseCode::Normal => Some(Err(ApiError::Other(
+            anyhow::anyhow!("log stream closed abnormally ({code}): {reason}"),
+        ))),
+        _ => None,
+    }
+}
+
+/// Map a failed WebSocket upgrade onto a meaningful error. A non-101 status is
+/// the common real failure (expired session, missing instance); surface its
+/// class rather than a generic "failed to upgrade". The server's response body
+/// is already consumed by the handshake, so only the status is available.
+fn map_upgrade_error(e: reqwest_websocket::Error) -> ApiError {
+    use reqwest_websocket::{Error, HandshakeError};
+    if let Error::Handshake(HandshakeError::UnexpectedStatusCode(status)) = &e {
+        let code = status.as_u16();
+        return match code {
+            401 | 403 => ApiError::AuthRequired(
+                "not authorized to stream logs; your session may have expired — log in again"
+                    .into(),
+            ),
+            404 => ApiError::Server {
+                status: code,
+                reason: "instance not found".into(),
+            },
+            _ => ApiError::Server {
+                status: code,
+                reason: format!("log stream upgrade rejected ({status})"),
+            },
+        };
+    }
+    ApiError::Other(anyhow::anyhow!("failed to upgrade to WebSocket: {e}"))
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use reqwest_websocket::{CloseCode, Message};
+
+    #[test]
+    fn text_frame_parses_into_a_log_message() {
+        let json = r#"{"log_type":"stdout","timestamp_ms":1,"state":null,"message":"hi"}"#;
+        let item = classify_frame(Message::Text(json.to_string())).expect("text yields an item");
+        let log = item.expect("valid json parses");
+        assert_eq!(log.log_type, "stdout");
+        assert_eq!(log.message.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn malformed_text_frame_is_an_error_item() {
+        let item = classify_frame(Message::Text("not json".to_string())).expect("yields an item");
+        assert!(
+            item.is_err(),
+            "a parse failure must surface as an error item"
+        );
+    }
+
+    #[test]
+    fn normal_close_ends_the_stream_cleanly() {
+        let frame = Message::Close {
+            code: CloseCode::Normal,
+            reason: String::new(),
+        };
+        assert!(
+            classify_frame(frame).is_none(),
+            "a normal close is a clean end, not an item"
+        );
+    }
+
+    #[test]
+    fn abnormal_close_surfaces_as_an_error() {
+        let frame = Message::Close {
+            code: CloseCode::Error,
+            reason: "boom".into(),
+        };
+        let item = classify_frame(frame).expect("abnormal close yields an item");
+        let err = item.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("boom"),
+            "abnormal close must error with the server reason: {err:#}"
+        );
+    }
+
+    #[test]
+    fn control_frames_are_ignored() {
+        assert!(classify_frame(Message::Ping(Vec::new().into())).is_none());
+        assert!(classify_frame(Message::Pong(Vec::new().into())).is_none());
+        assert!(classify_frame(Message::Binary(Vec::new().into())).is_none());
     }
 }

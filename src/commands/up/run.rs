@@ -2,10 +2,10 @@
 //!
 //! Composition only — each step lives in its own module with focused tests.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use dialoguer::{Confirm, Input};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use unisrv_api::ApiClient;
 
 use super::apply::apply;
@@ -16,9 +16,8 @@ use super::plan::{EnvAction, diff};
 use super::preflight::{ensure_hosts_ready, validate_host_ownership};
 use super::render::{PlanStyles, render};
 use super::vars;
+use crate::config_locate::{CONFIG_FILE, find_config};
 use crate::progress::{Icon, Progress, SpinnerProgress};
-
-const CONFIG_FILE: &str = "unisrv.hcl";
 
 pub async fn run(
     client: &dyn ApiClient,
@@ -26,10 +25,10 @@ pub async fn run(
     var_flags: &[String],
     var_files: &[PathBuf],
 ) -> Result<()> {
-    let path = Path::new(CONFIG_FILE);
-    if !path.exists() {
-        bail!("no {CONFIG_FILE} found in current directory");
-    }
+    let cwd = std::env::current_dir().context("failed to determine the current directory")?;
+    let manifest = find_config(&cwd, CONFIG_FILE)
+        .ok_or_else(|| anyhow!("no {CONFIG_FILE} found in the current directory"))?;
+    let path = manifest.path.as_path();
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 

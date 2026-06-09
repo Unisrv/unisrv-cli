@@ -2,14 +2,24 @@
 
 use async_trait::async_trait;
 use chrono::Duration;
+use futures_util::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::auth::AuthSession;
-use crate::client::ApiClient;
+use crate::client::{ApiClient, LogStream};
 use crate::error::{ApiError, Result};
 use crate::models::*;
+
+/// Scripted outcome for a [`MockApiClient::stream_instance_logs`] call.
+pub enum StreamLogsResponse {
+    /// The upgrade failed before any frame arrived (e.g. instance not found).
+    ConnectError(ApiError),
+    /// The stream connected and yields these frames in order, then closes —
+    /// modelling history replay followed by the server closing the connection.
+    Frames(Vec<Result<LogMessage>>),
+}
 
 /// Records which methods were called and with what arguments.
 #[derive(Default)]
@@ -31,6 +41,8 @@ pub struct CallLog {
     pub create_environment_calls: Vec<CreateEnvironmentRequest>,
     pub delete_environment_calls: Vec<Uuid>,
     pub list_instances_calls: Vec<Uuid>,
+    pub get_instance_logs_calls: Vec<(Uuid, Uuid)>,
+    pub stream_instance_logs_calls: Vec<(Uuid, Uuid)>,
     pub deprovision_instance_calls: Vec<(Uuid, Uuid, Option<InstanceDeprovisionRequest>)>,
     pub list_services_calls: Vec<Uuid>,
     pub get_service_calls: Vec<(Uuid, Uuid)>,
@@ -86,6 +98,9 @@ pub struct MockApiClient {
     pub delete_environment_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub list_instances_responses:
         Mutex<VecDeque<std::result::Result<InstanceListResponse, ApiError>>>,
+    pub get_instance_logs_responses:
+        Mutex<VecDeque<std::result::Result<Vec<LogMessage>, ApiError>>>,
+    pub stream_logs_responses: Mutex<VecDeque<StreamLogsResponse>>,
     pub deprovision_instance_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
     pub list_services_response: ResponseSlot<ServiceListResponse>,
     pub get_service_responses:
@@ -128,6 +143,8 @@ impl Default for MockApiClient {
             create_environment_response: ResponseSlot::default(),
             delete_environment_responses: Mutex::new(VecDeque::new()),
             list_instances_responses: Mutex::new(VecDeque::new()),
+            get_instance_logs_responses: Mutex::new(VecDeque::new()),
+            stream_logs_responses: Mutex::new(VecDeque::new()),
             deprovision_instance_responses: Mutex::new(VecDeque::new()),
             list_services_response: ResponseSlot::default(),
             get_service_responses: Mutex::new(VecDeque::new()),
@@ -257,6 +274,46 @@ impl MockApiClient {
             .lock()
             .unwrap()
             .push_back(resp);
+        self
+    }
+
+    /// Queue one `get_instance_logs` response.
+    pub fn push_instance_logs(self, resp: std::result::Result<Vec<LogMessage>, ApiError>) -> Self {
+        self.get_instance_logs_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    /// Queue a log stream that yields these frames (each as a success) and then
+    /// closes — the common "history replays, then the instance stops" case.
+    pub fn push_stream_logs(self, frames: Vec<LogMessage>) -> Self {
+        self.stream_logs_responses
+            .lock()
+            .unwrap()
+            .push_back(StreamLogsResponse::Frames(
+                frames.into_iter().map(Ok).collect(),
+            ));
+        self
+    }
+
+    /// Queue a log stream with explicit per-frame results, so a test can inject
+    /// a mid-stream transport error after some good frames.
+    pub fn push_stream_logs_frames(self, frames: Vec<Result<LogMessage>>) -> Self {
+        self.stream_logs_responses
+            .lock()
+            .unwrap()
+            .push_back(StreamLogsResponse::Frames(frames));
+        self
+    }
+
+    /// Queue a log stream whose connection (upgrade) fails before any frame.
+    pub fn push_stream_connect_error(self, err: ApiError) -> Self {
+        self.stream_logs_responses
+            .lock()
+            .unwrap()
+            .push_back(StreamLogsResponse::ConnectError(err));
         self
     }
 
@@ -516,8 +573,34 @@ impl ApiClient for MockApiClient {
             .pop_front()
             .unwrap_or_else(|| panic!("list_instances_response not configured"))
     }
-    async fn get_instance_logs(&self, _: Uuid, _: Uuid) -> Result<Vec<LogMessage>> {
-        unimplemented!()
+    async fn get_instance_logs(&self, env_id: Uuid, instance_id: Uuid) -> Result<Vec<LogMessage>> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("get_instance_logs");
+            calls.get_instance_logs_calls.push((env_id, instance_id));
+        }
+        self.get_instance_logs_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("get_instance_logs_response not configured"))
+    }
+    async fn stream_instance_logs(&self, env_id: Uuid, instance_id: Uuid) -> Result<LogStream> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("stream_instance_logs");
+            calls.stream_instance_logs_calls.push((env_id, instance_id));
+        }
+        match self
+            .stream_logs_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("stream_instance_logs_response not configured"))
+        {
+            StreamLogsResponse::ConnectError(err) => Err(err),
+            StreamLogsResponse::Frames(frames) => Ok(futures_util::stream::iter(frames).boxed()),
+        }
     }
     async fn create_tcp_proxy(
         &self,

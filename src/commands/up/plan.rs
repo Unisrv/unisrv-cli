@@ -108,6 +108,17 @@ pub struct ResolvedEnvironment {
     pub slug: String,
 }
 
+impl From<&unisrv_api::models::EnvironmentListEntry> for ResolvedEnvironment {
+    fn from(entry: &unisrv_api::models::EnvironmentListEntry) -> Self {
+        Self {
+            id: entry.id,
+            name: entry.name.clone(),
+            project: entry.project.clone(),
+            slug: entry.slug.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceAction {
     Create(DesiredService),

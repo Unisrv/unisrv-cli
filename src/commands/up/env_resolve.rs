@@ -17,7 +17,7 @@ use unisrv_api::ApiClient;
 use unisrv_api::models::{CreateEnvironmentRequest, EnvironmentListEntry};
 
 use super::defaults::{DEFAULT_ENV_NAME, default_env_display_name};
-use super::plan::{EnvAction, ResolvedEnvironment};
+use super::plan::EnvAction;
 use crate::progress::{Icon, Progress};
 
 /// Abstraction over user prompting for env metadata. Production uses a
@@ -50,7 +50,7 @@ pub async fn resolve(
 
     if let Some(name) = env_flag {
         if let Some(found) = matching.iter().find(|e| e.name == name) {
-            return Ok(EnvAction::Use(entry_to_resolved(found)));
+            return Ok(EnvAction::Use(found.into()));
         }
         // --env named a non-existent env: prompt for the rest.
         let req = prompt_create_env(prompter, project, name)?;
@@ -62,7 +62,7 @@ pub async fn resolve(
             let req = prompt_create_env(prompter, project, DEFAULT_ENV_NAME)?;
             Ok(EnvAction::Create(req))
         }
-        [only] => Ok(EnvAction::Use(entry_to_resolved(only))),
+        [only] => Ok(EnvAction::Use((only).into())),
         many => {
             let names: Vec<&str> = many.iter().map(|e| e.name.as_str()).collect();
             bail!(
@@ -88,15 +88,6 @@ fn prompt_create_env(
         display_name: Some(display),
         description,
     })
-}
-
-fn entry_to_resolved(entry: &EnvironmentListEntry) -> ResolvedEnvironment {
-    ResolvedEnvironment {
-        id: entry.id,
-        name: entry.name.clone(),
-        project: entry.project.clone(),
-        slug: entry.slug.clone(),
-    }
 }
 
 #[cfg(test)]
