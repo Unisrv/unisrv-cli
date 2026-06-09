@@ -4,27 +4,44 @@
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input};
-use std::path::Path;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use unisrv_api::ApiClient;
 
 use super::apply::apply;
-use super::config::UpConfig;
 use super::desired::DesiredState;
 use super::env_resolve::{Prompter, resolve as resolve_env};
 use super::fetch::fetch_current_state;
 use super::plan::{EnvAction, diff};
 use super::preflight::{ensure_hosts_ready, validate_host_ownership};
 use super::render::{PlanStyles, render};
+use super::vars;
 use crate::progress::{Icon, Progress, SpinnerProgress};
 
 const CONFIG_FILE: &str = "unisrv.hcl";
 
-pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
+pub async fn run(
+    client: &dyn ApiClient,
+    env_flag: Option<&str>,
+    var_flags: &[String],
+    var_files: &[PathBuf],
+) -> Result<()> {
     let path = Path::new(CONFIG_FILE);
     if !path.exists() {
         bail!("no {CONFIG_FILE} found in current directory");
     }
-    let config = UpConfig::load(path)?;
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    let prompter = DialoguerPrompter;
+
+    // Gather interpolation variables, then resolve the config — prompting for
+    // any referenced-but-unset variable when stdin is a terminal. We gate on
+    // stdin (not stdout) because that's where prompt answers are read from.
+    let files = read_var_files(var_files)?;
+    let base = vars::collect(var_flags, &files)?;
+    let interactive = std::io::stdin().is_terminal();
+    let config = vars::resolve_config(path, &source, base, interactive, &prompter)?;
     let desired = DesiredState::from_config(config);
 
     let progress = SpinnerProgress::new();
@@ -33,7 +50,6 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     // is reused by apply for host→id resolution when linking/unlinking.
     let hosts = ensure_hosts_ready(client, &desired, &progress).await?;
 
-    let prompter = DialoguerPrompter;
     let env_action = resolve_env(client, &desired.project, env_flag, &prompter, &progress).await?;
 
     // If we're creating an env, there is no current state to fetch.
@@ -84,6 +100,19 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
 
     apply(plan, client, &hosts, &progress).await?;
     Ok(())
+}
+
+/// Read each `--var-file` into `(label, contents)` for [`vars::collect`]. The
+/// label is the path as written, used in error messages.
+fn read_var_files(paths: &[PathBuf]) -> Result<Vec<(String, String)>> {
+    paths
+        .iter()
+        .map(|p| {
+            let contents = std::fs::read_to_string(p)
+                .with_context(|| format!("failed to read var file {}", p.display()))?;
+            Ok((p.display().to_string(), contents))
+        })
+        .collect()
 }
 
 struct DialoguerPrompter;

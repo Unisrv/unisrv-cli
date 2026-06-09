@@ -28,8 +28,11 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
     if !path.exists() {
         anyhow::bail!("no {CONFIG_FILE} found in current directory");
     }
-    let config = UpConfig::load(path)?;
-    let project = config.project;
+    // Destroy needs only the project name; it intentionally does not evaluate
+    // interpolation (and requires no `--var`), since variables don't affect a
+    // teardown. `project` must therefore be a literal, which `load_project`
+    // reads directly without a variable context.
+    let project = UpConfig::load_project(path)?;
 
     let progress = SpinnerProgress::new();
 

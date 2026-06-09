@@ -1,15 +1,33 @@
 //! Typed view of `unisrv.hcl`.
 //!
-//! Parsing is done with `hcl-rs` via serde derive into typed structs. Variable
-//! interpolation is *not* supported yet — when we add it, the migration path is
-//! to parse to `hcl::Body`, evaluate, then deserialize into these same types.
+//! Parsing goes through `hcl-rs`: source is parsed to a structural `hcl::Body`,
+//! `${var.X}` references are evaluated against caller-supplied variables, and
+//! the result is deserialized into these typed structs via serde. See
+//! [`UpConfig::resolve`]; command-line variable handling lives in [`super::vars`].
 
 use anyhow::{Context, Result};
+use hcl::eval::Evaluate;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::parse_error::{ConfigParseError, Locator};
+
+/// Outcome of resolving a config against a set of interpolation variables.
+///
+/// Resolution is deliberately *not* all-or-nothing: a config that references
+/// `${var.X}` for which no value was supplied comes back as [`Missing`] listing
+/// the names, so the caller can prompt for them and try again — rather than
+/// failing outright.
+///
+/// [`Missing`]: VarResolution::Missing
+#[derive(Debug)]
+pub enum VarResolution {
+    /// Every referenced variable had a value; the typed config is ready.
+    Resolved(UpConfig),
+    /// These variable names are referenced but were not supplied.
+    Missing(BTreeSet<String>),
+}
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -55,28 +73,110 @@ pub struct ContainerBlock {
 }
 
 impl UpConfig {
+    /// Parse with no interpolation variables, expecting none to be referenced.
+    /// Test convenience over [`resolve`](Self::resolve).
     #[cfg(test)]
     pub fn parse(source: &str) -> Result<Self> {
-        Self::parse_at(Path::new("unisrv.hcl"), source)
+        match Self::resolve(Path::new("unisrv.hcl"), source, &BTreeMap::new())? {
+            VarResolution::Resolved(cfg) => Ok(cfg),
+            VarResolution::Missing(missing) => {
+                anyhow::bail!("config references unset variables: {missing:?}")
+            }
+        }
     }
 
-    pub fn parse_at(path: &Path, source: &str) -> Result<Self> {
-        // Parse to a structural Body first so we can catch issues that
-        // `hcl-rs`'s serde path silently swallows: duplicate labeled blocks
-        // (it merges them into a malformed expression value) and empty labels.
-        let body: hcl::Body =
-            hcl::from_str(source).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
-        validate_blocks(path, source, &body)?;
+    /// Parse `source`, interpolating `${var.X}` references from `vars`.
+    ///
+    /// Structural validation (labels, duplicate blocks) happens on the raw body
+    /// first; the body is then evaluated with `vars` bound under a `var` object
+    /// and deserialized into the typed config, which is finally validated with
+    /// concrete (substituted) values.
+    pub fn resolve(
+        path: &Path,
+        source: &str,
+        vars: &BTreeMap<String, String>,
+    ) -> Result<VarResolution> {
+        let body = parse_body(path, source)?;
+
+        let mut ctx = hcl::eval::Context::new();
+        ctx.declare_var("var", var_object(vars));
+
+        let mut evaluated = body.clone();
+        if let Err(errors) = evaluated.evaluate_in_place(&ctx) {
+            // A reference to an absent key under the `var` object surfaces as
+            // `NoSuchKey`; we report those as missing interpolation variables so
+            // the caller can prompt for them. A `NoSuchKey` can also come from a
+            // user-side object access that isn't a `var` — that gets reported as
+            // missing too, but the resolve loop bails when prompting fails to
+            // shrink the set. Any other eval error (e.g. a typo'd namespace
+            // yielding an undefined variable) is a real fault, surfaced now.
+            let mut missing = BTreeSet::new();
+            for err in &errors {
+                match err.kind() {
+                    hcl::eval::ErrorKind::NoSuchKey(key) => {
+                        missing.insert(key.clone());
+                    }
+                    _ => {
+                        // Eval errors carry no source span; point the caret at
+                        // the offending identifier (best-effort) so the report
+                        // looks like the rest of our config errors.
+                        let locator = match err.kind() {
+                            hcl::eval::ErrorKind::UndefinedVar(ident) => {
+                                Some(Locator::substring(ident.as_str()))
+                            }
+                            _ => None,
+                        };
+                        return Err(ConfigParseError::validation(
+                            path,
+                            source,
+                            err.to_string(),
+                            locator,
+                        )
+                        .into());
+                    }
+                }
+            }
+            return Ok(VarResolution::Missing(missing));
+        }
+
         let cfg: Self =
-            hcl::from_body(body).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
+            hcl::from_body(evaluated).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
         cfg.validate(path, source)?;
-        Ok(cfg)
+        Ok(VarResolution::Resolved(cfg))
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Read just the top-level `project` name, without interpolation.
+    ///
+    /// `destroy` needs only the project and supplies no variables, so it must
+    /// not evaluate (or deserialize) the rest of the body — which may reference
+    /// unprovided `${var.…}`. `project` is required to be a literal, so it can
+    /// be read directly off the raw body.
+    pub fn parse_project_at(path: &Path, source: &str) -> Result<String> {
+        let body = parse_body(path, source)?;
+        for attr in body.attributes() {
+            if attr.key() == "project"
+                && let hcl::Expression::String(s) = attr.expr()
+            {
+                if s.trim().is_empty() {
+                    return Err(ConfigParseError::validation(
+                        path,
+                        source,
+                        "`project` must be a non-empty string",
+                        Some(Locator::field("project")),
+                    )
+                    .into());
+                }
+                return Ok(s.clone());
+            }
+        }
+        Err(ConfigParseError::validation(path, source, "missing field `project`", None).into())
+    }
+
+    /// Read just the `project` name from the config file at `path`.
+    pub fn load_project(path: &Path) -> Result<String> {
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        Self::parse_at(path, &source)
+        Self::parse_project_at(path, &source)
     }
 
     fn validate(&self, path: &Path, source: &str) -> Result<(), ConfigParseError> {
@@ -131,6 +231,54 @@ impl UpConfig {
         }
         Ok(())
     }
+}
+
+/// Parse `source` to a structural body and run the variable-independent
+/// validation shared by both `up` and `destroy`: structural block checks and
+/// the literal-`project` rule. Variable evaluation, typed deserialization, and
+/// semantic validation happen only on top of this, on the `up` path — so the
+/// two commands never diverge on what they consider a structurally valid file.
+fn parse_body(path: &Path, source: &str) -> Result<hcl::Body, ConfigParseError> {
+    let body: hcl::Body =
+        hcl::from_str(source).map_err(|e| ConfigParseError::from_hcl(path, source, e))?;
+    validate_blocks(path, source, &body)?;
+    reject_interpolated_project(path, source, &body)?;
+    Ok(body)
+}
+
+/// Reject `${var.…}` interpolation in the top-level `project` attribute.
+///
+/// `project` is read by `destroy` with no variable context, so it must not
+/// depend on interpolation — it has to be a bare string literal. A literal
+/// parses as [`hcl::Expression::String`]; anything with a template becomes a
+/// `TemplateExpr` (or another expression kind), which we reject here.
+fn reject_interpolated_project(
+    path: &Path,
+    source: &str,
+    body: &hcl::Body,
+) -> Result<(), ConfigParseError> {
+    for attr in body.attributes() {
+        if attr.key() == "project" && !matches!(attr.expr(), hcl::Expression::String(_)) {
+            return Err(ConfigParseError::validation(
+                path,
+                source,
+                "`project` must be a plain quoted string literal".to_string(),
+                Some(Locator::field("project")),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build the `var` object bound into the evaluation context. Values are always
+/// strings (the only var type we support); references like `${var.foo}` resolve
+/// to `vars["foo"]`, and references to absent keys surface as eval errors.
+fn var_object(vars: &BTreeMap<String, String>) -> hcl::Value {
+    hcl::Value::Object(
+        vars.iter()
+            .map(|(k, v)| (k.clone(), hcl::Value::from(v.clone())))
+            .collect(),
+    )
 }
 
 /// The platform base domain. Custom hosts under it are served by a wildcard
@@ -214,6 +362,267 @@ fn walk_blocks<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolve_with(src: &str, vars: &[(&str, &str)]) -> VarResolution {
+        let map: BTreeMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        UpConfig::resolve(Path::new("unisrv.hcl"), src, &map).unwrap()
+    }
+
+    #[test]
+    fn rejects_interpolation_in_block_label() {
+        // hcl does not allow interpolation in block labels — it is a parse
+        // error — so a label can never silently ship as a literal `${...}`
+        // string. This guards that behaviour against a future hcl change.
+        let src = r#"
+project = "demo"
+service "${var.env}-web" {}
+"#;
+        assert!(UpConfig::resolve(Path::new("unisrv.hcl"), src, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn resolve_substitutes_provided_var_into_template() {
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = "myapp:${var.image_tag}"
+  }
+}
+"#;
+        let cfg = match resolve_with(src, &[("image_tag", "v1.2.3")]) {
+            VarResolution::Resolved(cfg) => cfg,
+            VarResolution::Missing(m) => panic!("unexpected missing vars: {m:?}"),
+        };
+        assert_eq!(cfg.deployment["app"].container.image, "myapp:v1.2.3");
+    }
+
+    #[test]
+    fn resolve_substitutes_bare_traversal() {
+        // A bare `var.x` (not inside a "${...}" template) must also resolve.
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = var.image
+  }
+}
+"#;
+        let cfg = match resolve_with(src, &[("image", "nginx:1.27")]) {
+            VarResolution::Resolved(cfg) => cfg,
+            VarResolution::Missing(m) => panic!("unexpected missing vars: {m:?}"),
+        };
+        assert_eq!(cfg.deployment["app"].container.image, "nginx:1.27");
+    }
+
+    #[test]
+    fn resolve_reports_missing_var() {
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = "myapp:${var.image_tag}"
+  }
+}
+"#;
+        match resolve_with(src, &[]) {
+            VarResolution::Missing(m) => {
+                assert_eq!(m, BTreeSet::from(["image_tag".to_string()]));
+            }
+            VarResolution::Resolved(_) => panic!("expected missing image_tag"),
+        }
+    }
+
+    #[test]
+    fn resolve_reports_all_missing_vars_at_once() {
+        // Two distinct missing vars in separate attributes should both be
+        // reported in a single pass, so the caller can prompt for everything.
+        let src = r#"
+project = "demo"
+deployment "app" {
+  port = 8080
+  container {
+    image = "myapp:${var.tag}"
+    env = {
+      API_URL = var.api_url
+    }
+  }
+}
+"#;
+        match resolve_with(src, &[]) {
+            VarResolution::Missing(m) => {
+                assert_eq!(
+                    m,
+                    BTreeSet::from(["tag".to_string(), "api_url".to_string()])
+                );
+            }
+            VarResolution::Resolved(_) => panic!("expected missing vars"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_interpolated_project() {
+        // `project` must be a literal: it's read by `destroy` without any var
+        // context, so it can't depend on interpolation. Reject it even when the
+        // referenced var *is* supplied.
+        let src = r#"project = "app-${var.suffix}""#;
+        let map = BTreeMap::from([("suffix".to_string(), "prod".to_string())]);
+        let err = UpConfig::resolve(Path::new("unisrv.hcl"), src, &map).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("project"), "should name project: {msg}");
+        assert!(
+            msg.contains("literal"),
+            "should explain literal rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_namespace() {
+        // `vars` (note the trailing s) is not a declared namespace. This is a
+        // genuine error, not a request to prompt for a missing `var` value.
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = "myapp:${vars.image_tag}"
+  }
+}
+"#;
+        let err = UpConfig::resolve(Path::new("unisrv.hcl"), src, &BTreeMap::new()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("vars"),
+            "should surface the undefined namespace: {msg}"
+        );
+    }
+
+    #[test]
+    fn eval_error_renders_with_source_pointer() {
+        // A typo'd namespace (`vars` instead of `var`) is a real eval error; it
+        // should render the cargo-style caret like other config errors, not a
+        // bare message.
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = "x:${vars.tag}"
+  }
+}
+"#;
+        let err = UpConfig::resolve(Path::new("unisrv.hcl"), src, &BTreeMap::new()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vars"), "names the offender: {msg}");
+        assert!(msg.contains("-->"), "renders a source pointer: {msg}");
+        assert!(msg.contains('^'), "renders a caret under the token: {msg}");
+    }
+
+    #[test]
+    fn resolve_ignores_unused_vars() {
+        // A supplied var that nothing references is harmless (no warning in the
+        // MVP) — resolution still succeeds.
+        let src = r#"
+project = "demo"
+deployment "app" {
+  container {
+    image = "myapp:${var.tag}"
+  }
+}
+"#;
+        let cfg = match resolve_with(src, &[("tag", "v1"), ("unused", "whatever")]) {
+            VarResolution::Resolved(cfg) => cfg,
+            VarResolution::Missing(m) => panic!("unexpected missing vars: {m:?}"),
+        };
+        assert_eq!(cfg.deployment["app"].container.image, "myapp:v1");
+    }
+
+    #[test]
+    fn resolve_validates_substituted_values() {
+        // The interpolated host is only invalid *after* substitution, so this
+        // proves evaluation happens before semantic validation.
+        let src = r#"
+project = "demo"
+service "web" {
+  hosts = ["${var.sub}.unisrv.dev"]
+}
+"#;
+        // Hyphenated single label under the base domain is rejected.
+        let map = BTreeMap::from([("sub".to_string(), "my-app".to_string())]);
+        let err = UpConfig::resolve(Path::new("unisrv.hcl"), src, &map).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("my-app.unisrv.dev"),
+            "validation should see the substituted host: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_project_reads_project_ignoring_var_references() {
+        // `destroy` reads only the project name and supplies no vars, so a
+        // config whose deployment blocks reference unprovided vars must still
+        // yield the project.
+        let src = r#"
+project = "myproj"
+deployment "app" {
+  container {
+    image = "${var.never_provided}"
+  }
+}
+"#;
+        let project = UpConfig::parse_project_at(Path::new("unisrv.hcl"), src).unwrap();
+        assert_eq!(project, "myproj");
+    }
+
+    #[test]
+    fn parse_project_at_runs_shared_structural_validation() {
+        // destroy reads `project` through the same structural validation as up,
+        // so a malformed config (here: duplicate blocks) is rejected by both —
+        // no validation divergence between the two commands. Still needs no vars.
+        let src = r#"
+project = "myproj"
+deployment "app" {
+  container { image = "i1" }
+}
+deployment "app" {
+  container { image = "i2" }
+}
+"#;
+        let err = UpConfig::parse_project_at(Path::new("unisrv.hcl"), src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("duplicate"),
+            "destroy should reject duplicate blocks like up does; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_heredoc_project_without_misattributing_interpolation() {
+        // A heredoc parses as a template (not a String literal) even with no
+        // ${...}, so it's rejected — but the message must not claim the user
+        // used interpolation when they didn't.
+        let src = "project = <<-EOT\nmyproj\nEOT\n";
+        let err = UpConfig::resolve(Path::new("unisrv.hcl"), src, &BTreeMap::new()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("literal"),
+            "should explain the literal rule: {msg}"
+        );
+        assert!(
+            !msg.contains("interpolation"),
+            "should not misattribute to interpolation: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_project_rejects_interpolated_project() {
+        let src = r#"project = "app-${var.x}""#;
+        let err = UpConfig::parse_project_at(Path::new("unisrv.hcl"), src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("project"), "msg: {msg}");
+        assert!(msg.contains("literal"), "msg: {msg}");
+    }
 
     #[test]
     fn parses_minimal_nginx_example() {

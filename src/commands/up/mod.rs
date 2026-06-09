@@ -10,5 +10,6 @@ pub mod plan;
 pub mod preflight;
 pub mod render;
 pub mod run;
+pub mod vars;
 
 pub use run::run;

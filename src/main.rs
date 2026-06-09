@@ -1,6 +1,8 @@
 mod commands;
 mod progress;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use commands::up::parse_error::ConfigParseError;
 use unisrv_api::{ApiClient, ApiError, HttpApiClient};
@@ -47,6 +49,12 @@ enum Commands {
         /// Pin which environment to target by name (overrides project lookup)
         #[arg(long)]
         env: Option<String>,
+        /// Set an interpolation variable, e.g. --var image_tag=v1.2.3 (repeatable)
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Load interpolation variables from a dotenv-style file (repeatable)
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
     },
     /// Destroy the selected environment: delete all its services, deployments,
     /// standalone instances, and the environment itself
@@ -201,7 +209,11 @@ async fn main() {
                 commands::registry::test(client, &hostname).await
             }
         },
-        Commands::Up { env } => commands::up::run(client, env.as_deref()).await,
+        Commands::Up {
+            env,
+            vars,
+            var_files,
+        } => commands::up::run(client, env.as_deref(), &vars, &var_files).await,
         Commands::Destroy { env } => commands::destroy::run(client, env.as_deref()).await,
     };
 
