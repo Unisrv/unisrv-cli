@@ -24,6 +24,7 @@ pub enum Icon {
     Deployment,
     Host,
     Instance,
+    Network,
     Lookup,
 }
 
@@ -35,6 +36,7 @@ impl Icon {
             Icon::Deployment => "🚀",
             Icon::Host => "🌐",
             Icon::Instance => "🖥️",
+            Icon::Network => "🕸️",
             Icon::Lookup => "🔍",
         }
     }

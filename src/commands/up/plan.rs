@@ -7,9 +7,10 @@
 //! Important constraints from the backend:
 //!  * `update_service` only accepts `HTTPServiceConfig`. `host` / `region` /
 //!    `name` are immutable post-creation, so a change forces **Recreate**.
-//!  * `update_deployment` only mutates `DeploymentConfiguration`. The
-//!    `service_id` / `target_group` binding is creation-only, so a binding
-//!    change forces **Recreate**.
+//!  * `update_deployment` mutates `DeploymentConfiguration` and the network
+//!    binding (`network_id` is full desired state on PUT; the operator rolls
+//!    instances zero-downtime). The `service_id` / `target_group` binding is
+//!    creation-only, so a service-binding change forces **Recreate**.
 //!  * Because `services -> deployments` is `ON DELETE SET NULL` and we cannot
 //!    rebind, a service Recreate **cascade-recreates** every deployment bound
 //!    to it.
@@ -19,12 +20,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use unisrv_api::models::{CreateEnvironmentRequest, DeploymentConfiguration, HTTPServiceConfig};
 use uuid::Uuid;
 
-use super::desired::{DesiredDeployment, DesiredService, DesiredState};
+use super::desired::{DesiredDeployment, DesiredNetwork, DesiredService, DesiredState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CurrentState {
     pub services: BTreeMap<String, CurrentService>,
     pub deployments: BTreeMap<String, CurrentDeployment>,
+    pub networks: BTreeMap<String, CurrentNetwork>,
 }
 
 impl CurrentState {
@@ -32,8 +34,16 @@ impl CurrentState {
         CurrentState {
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
+            networks: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurrentNetwork {
+    pub id: Uuid,
+    pub name: String,
+    pub ipv4_cidr: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +64,9 @@ pub struct CurrentDeployment {
     pub configuration: DeploymentConfiguration,
     /// Resolved name of the bound service (from server-side service_id lookup).
     pub service_binding: Option<CurrentServiceBinding>,
+    /// Resolved name of the joined network (from server-side network_id lookup).
+    /// `None` also covers a dangling id whose network was deleted out-of-band.
+    pub network_binding: Option<CurrentNetworkBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,14 +77,18 @@ pub struct CurrentServiceBinding {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CurrentNetworkBinding {
+    pub network_id: Uuid,
+    pub network_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub project: String,
     pub env_action: EnvAction,
     pub service_actions: Vec<ServiceAction>,
     pub deployment_actions: Vec<DeploymentAction>,
-    /// Snapshot of existing service IDs by name, for apply to look up bindings
-    /// to services that aren't being acted on (unchanged) or were recreated.
-    pub existing_service_ids: BTreeMap<String, Uuid>,
+    pub network_actions: Vec<NetworkAction>,
     /// Instances to deprovision directly (not via a deployment). Always empty for
     /// `up` — only `destroy` appends standalone instances here. Applied as a no-op
     /// when empty, so `up` stays instance-unaware.
@@ -147,18 +164,50 @@ impl ServiceAction {
     }
 }
 
+/// A reference from one resource to another, resolved as far as plan time
+/// allows. "Resolved as existing" is a fact the diff establishes once, here —
+/// apply never re-derives it from a name lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceRef {
+    /// The target exists and is not touched by this plan: its uuid is known
+    /// at plan time.
+    Existing { id: Uuid, name: String },
+    /// The target is created or recreated by this plan: its uuid is minted
+    /// during apply and resolved from the minted-ids map.
+    Pending { name: String },
+}
+
+/// A deployment's service binding with its service reference resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedServiceBinding {
+    pub service: ResourceRef,
+    pub target_group: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeploymentAction {
-    Create(DesiredDeployment),
+    Create {
+        desired: DesiredDeployment,
+        /// Resolved service binding (creation-only on the backend).
+        service: Option<ResolvedServiceBinding>,
+        /// Resolved network reference.
+        network: Option<ResourceRef>,
+    },
     Update {
         id: Uuid,
         desired: DesiredDeployment,
         current: CurrentDeployment,
+        /// Resolved network reference. Always `Existing` (or `None`): a
+        /// deployment desiring a created/recreated network is forced onto the
+        /// Create/Recreate path by the diff, never Update.
+        network: Option<ResourceRef>,
     },
     Recreate {
         current: CurrentDeployment,
         desired: DesiredDeployment,
         reasons: Vec<RecreateReason>,
+        service: Option<ResolvedServiceBinding>,
+        network: Option<ResourceRef>,
     },
     Delete(CurrentDeployment),
 }
@@ -167,12 +216,26 @@ impl DeploymentAction {
     #[allow(dead_code)]
     pub fn name(&self) -> &str {
         match self {
-            DeploymentAction::Create(d) => &d.name,
+            DeploymentAction::Create { desired, .. } => &desired.name,
             DeploymentAction::Update { desired, .. } => &desired.name,
             DeploymentAction::Recreate { desired, .. } => &desired.name,
             DeploymentAction::Delete(c) => &c.name,
         }
     }
+}
+
+/// Networks have no update endpoint and both fields (name = the map key,
+/// `ipv4_cidr`) are immutable, so the taxonomy is Create / Recreate / Delete —
+/// there is no Update variant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NetworkAction {
+    Create(DesiredNetwork),
+    Recreate {
+        current: CurrentNetwork,
+        desired: DesiredNetwork,
+        reasons: Vec<RecreateReason>,
+    },
+    Delete(CurrentNetwork),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,113 +251,194 @@ pub enum RecreateReason {
     /// The service this deployment binds to is being recreated, so the binding
     /// would be lost. We have to recreate this deployment after the service.
     DependentServiceRecreated { service_name: String },
+    /// The network this deployment joins is being recreated under a new id, so
+    /// the deployment must be recreated after the network to pick it up.
+    DependentNetworkRecreated { network_name: String },
+}
+
+/// The shared name-keyed reconciliation walk: a desired entry with no current
+/// counterpart becomes `on_create`; a pair present on both sides is judged by
+/// `on_both` (`None` = no action); a current entry no longer desired becomes
+/// `on_delete`. Per-resource policy (what recreates, what updates) lives
+/// entirely in the closures — this owns only the set arithmetic, so the three
+/// resource walks can't drift on it.
+fn diff_by_name<D, C, A>(
+    desired: &BTreeMap<String, D>,
+    current: &BTreeMap<String, C>,
+    mut on_create: impl FnMut(&D) -> A,
+    mut on_both: impl FnMut(&D, &C) -> Option<A>,
+    mut on_delete: impl FnMut(&C) -> A,
+) -> Vec<A> {
+    let mut actions = Vec::new();
+    for (name, d) in desired {
+        match current.get(name) {
+            None => actions.push(on_create(d)),
+            Some(c) => actions.extend(on_both(d, c)),
+        }
+    }
+    for (name, c) in current {
+        if !desired.contains_key(name) {
+            actions.push(on_delete(c));
+        }
+    }
+    actions
 }
 
 pub fn diff(desired: &DesiredState, current: &CurrentState, env_action: EnvAction) -> Plan {
     // ── Services ──
-    let mut service_actions: Vec<ServiceAction> = Vec::new();
     let mut recreated_services: BTreeSet<String> = BTreeSet::new();
 
-    let desired_service_names: BTreeSet<&String> = desired.services.keys().collect();
-    let current_service_names: BTreeSet<&String> = current.services.keys().collect();
-
-    for name in &desired_service_names {
-        let desired_svc = &desired.services[*name];
-        match current.services.get(*name) {
-            None => {
-                service_actions.push(ServiceAction::Create(desired_svc.clone()));
+    let service_actions = diff_by_name(
+        &desired.services,
+        &current.services,
+        |d| ServiceAction::Create(d.clone()),
+        |d, c| {
+            let immutable_diffs = super::diff::service::immutable_diffs(d, c);
+            if !immutable_diffs.is_empty() {
+                recreated_services.insert(d.name.clone());
+                Some(ServiceAction::Recreate {
+                    current: c.clone(),
+                    desired: d.clone(),
+                    reasons: immutable_diffs,
+                })
+            } else if d.configuration != c.configuration || super::diff::service::hosts_differ(d, c)
+            {
+                Some(ServiceAction::Update {
+                    id: c.id,
+                    desired: d.clone(),
+                    current: c.clone(),
+                })
+            } else {
+                None
             }
-            Some(current_svc) => {
-                let immutable_diffs =
-                    super::diff::service::immutable_diffs(desired_svc, current_svc);
-                if !immutable_diffs.is_empty() {
-                    recreated_services.insert((*name).clone());
-                    service_actions.push(ServiceAction::Recreate {
-                        current: current_svc.clone(),
-                        desired: desired_svc.clone(),
-                        reasons: immutable_diffs,
-                    });
-                } else if desired_svc.configuration != current_svc.configuration
-                    || super::diff::service::hosts_differ(desired_svc, current_svc)
-                {
-                    service_actions.push(ServiceAction::Update {
-                        id: current_svc.id,
-                        desired: desired_svc.clone(),
-                        current: current_svc.clone(),
-                    });
-                }
-            }
-        }
-    }
+        },
+        |c| ServiceAction::Delete(c.clone()),
+    );
 
-    for name in current_service_names.difference(&desired_service_names) {
-        service_actions.push(ServiceAction::Delete(current.services[*name].clone()));
-    }
+    // ── Networks ──
+    // No update path exists (name and CIDR are both immutable), so a same-name
+    // CIDR change is a Recreate and everything else is Create/Delete.
+    let mut recreated_networks: BTreeSet<String> = BTreeSet::new();
+
+    let network_actions = diff_by_name(
+        &desired.networks,
+        &current.networks,
+        |d| NetworkAction::Create(d.clone()),
+        |d, c| {
+            if d.ipv4_cidr != c.ipv4_cidr {
+                recreated_networks.insert(d.name.clone());
+                Some(NetworkAction::Recreate {
+                    current: c.clone(),
+                    desired: d.clone(),
+                    reasons: vec![RecreateReason::ImmutableField {
+                        field: "iprange",
+                        old: c.ipv4_cidr.clone(),
+                        new: d.ipv4_cidr.clone(),
+                    }],
+                })
+            } else {
+                None
+            }
+        },
+        |c| NetworkAction::Delete(c.clone()),
+    );
 
     // ── Deployments ──
-    let mut deployment_actions: Vec<DeploymentAction> = Vec::new();
-
-    let desired_dep_names: BTreeSet<&String> = desired.deployments.keys().collect();
-    let current_dep_names: BTreeSet<&String> = current.deployments.keys().collect();
-
-    for name in &desired_dep_names {
-        let desired_dep = &desired.deployments[*name];
-        match current.deployments.get(*name) {
-            None => {
-                deployment_actions.push(DeploymentAction::Create(desired_dep.clone()));
-            }
-            Some(current_dep) => {
-                let mut reasons = Vec::new();
-
-                // Cascade: if bound to a service being recreated, force recreate.
-                if let Some(b) = &desired_dep.service_binding {
-                    if recreated_services.contains(&b.service_name) {
-                        reasons.push(RecreateReason::DependentServiceRecreated {
-                            service_name: b.service_name.clone(),
-                        });
-                    }
-                }
-
-                if !service_bindings_match(
-                    desired_dep.service_binding.as_ref(),
-                    current_dep.service_binding.as_ref(),
-                ) {
-                    reasons.push(RecreateReason::ServiceBindingChanged);
-                }
-
-                if !reasons.is_empty() {
-                    deployment_actions.push(DeploymentAction::Recreate {
-                        current: current_dep.clone(),
-                        desired: desired_dep.clone(),
-                        reasons,
-                    });
-                } else if desired_dep.configuration != current_dep.configuration {
-                    deployment_actions.push(DeploymentAction::Update {
-                        id: current_dep.id,
-                        desired: desired_dep.clone(),
-                        current: current_dep.clone(),
-                    });
-                }
-            }
+    // Resolve a referenced resource as far as plan time allows: a target that
+    // exists and is untouched by this plan carries its uuid; one created or
+    // recreated this run stays Pending until apply mints the new id.
+    let network_ref = |name: &String| -> ResourceRef {
+        match current.networks.get(name) {
+            Some(net) if !recreated_networks.contains(name) => ResourceRef::Existing {
+                id: net.id,
+                name: name.clone(),
+            },
+            _ => ResourceRef::Pending { name: name.clone() },
         }
-    }
+    };
+    let service_ref = |binding: &super::desired::DesiredServiceBinding| -> ResolvedServiceBinding {
+        let service = match current.services.get(&binding.service_name) {
+            Some(svc) if !recreated_services.contains(&binding.service_name) => {
+                ResourceRef::Existing {
+                    id: svc.id,
+                    name: binding.service_name.clone(),
+                }
+            }
+            _ => ResourceRef::Pending {
+                name: binding.service_name.clone(),
+            },
+        };
+        ResolvedServiceBinding {
+            service,
+            target_group: binding.target_group.clone(),
+        }
+    };
 
-    for name in current_dep_names.difference(&desired_dep_names) {
-        deployment_actions.push(DeploymentAction::Delete(current.deployments[*name].clone()));
-    }
+    let deployment_actions = diff_by_name(
+        &desired.deployments,
+        &current.deployments,
+        |d| DeploymentAction::Create {
+            service: d.service_binding.as_ref().map(&service_ref),
+            network: d.network.as_ref().map(&network_ref),
+            desired: d.clone(),
+        },
+        |d, c| {
+            let mut reasons = Vec::new();
 
-    let existing_service_ids = current
-        .services
-        .iter()
-        .map(|(name, svc)| (name.clone(), svc.id))
-        .collect();
+            // Cascade: if bound to a service being recreated, force recreate.
+            if let Some(b) = &d.service_binding
+                && recreated_services.contains(&b.service_name)
+            {
+                reasons.push(RecreateReason::DependentServiceRecreated {
+                    service_name: b.service_name.clone(),
+                });
+            }
+
+            // Cascade: a recreated network gets a NEW uuid, so a deployment
+            // desiring it must be recreated to bind to the new id.
+            if let Some(net) = &d.network
+                && recreated_networks.contains(net)
+            {
+                reasons.push(RecreateReason::DependentNetworkRecreated {
+                    network_name: net.clone(),
+                });
+            }
+
+            if !service_bindings_match(d.service_binding.as_ref(), c.service_binding.as_ref()) {
+                reasons.push(RecreateReason::ServiceBindingChanged);
+            }
+
+            if !reasons.is_empty() {
+                Some(DeploymentAction::Recreate {
+                    service: d.service_binding.as_ref().map(&service_ref),
+                    network: d.network.as_ref().map(&network_ref),
+                    current: c.clone(),
+                    desired: d.clone(),
+                    reasons,
+                })
+            } else if d.configuration != c.configuration || network_binding_differs(d, c) {
+                // A network binding change is an in-place Update: the backend
+                // swaps network_id on PUT and the operator rolls instances
+                // onto (or off) the network zero-downtime.
+                Some(DeploymentAction::Update {
+                    id: c.id,
+                    network: d.network.as_ref().map(&network_ref),
+                    desired: d.clone(),
+                    current: c.clone(),
+                })
+            } else {
+                None
+            }
+        },
+        |c| DeploymentAction::Delete(c.clone()),
+    );
 
     Plan {
         project: desired.project.clone(),
         env_action,
         service_actions,
         deployment_actions,
-        existing_service_ids,
+        network_actions,
         // diff is instance-unaware; destroy appends stops to the plan afterwards.
         instance_stops: Vec::new(),
     }
@@ -316,11 +460,24 @@ fn service_bindings_match(
     }
 }
 
+/// Compares user *intent* (network name) only — never `network_id`. Like
+/// service bindings, id resolution happens at apply time; a recreated network
+/// forces the deployment onto the Recreate path separately via
+/// [`RecreateReason::DependentNetworkRecreated`], not via this function.
+fn network_binding_differs(desired: &DesiredDeployment, current: &CurrentDeployment) -> bool {
+    desired.network.as_deref()
+        != current
+            .network_binding
+            .as_ref()
+            .map(|b| b.network_name.as_str())
+}
+
 impl Plan {
     pub fn is_empty(&self) -> bool {
         matches!(self.env_action, EnvAction::Use(_))
             && self.service_actions.is_empty()
             && self.deployment_actions.is_empty()
+            && self.network_actions.is_empty()
     }
 }
 
@@ -363,13 +520,13 @@ mod tests {
             vcpu_ratio: 0.25,
             vcpu_count: 1,
             memory_mb: 256,
-            network: None,
             instance_port: Some(80),
         }
     }
 
     fn desired_with_service(name: &str, host: &str) -> DesiredState {
         let mut s = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -405,6 +562,7 @@ mod tests {
     fn empty_desired_and_current_yields_empty_plan() {
         let plan = diff(
             &DesiredState {
+                networks: BTreeMap::new(),
                 project: "demo".into(),
                 services: BTreeMap::new(),
                 deployments: BTreeMap::new(),
@@ -419,6 +577,7 @@ mod tests {
     fn plan_is_not_empty_when_env_will_be_created() {
         let plan = diff(
             &DesiredState {
+                networks: BTreeMap::new(),
                 project: "demo".into(),
                 services: BTreeMap::new(),
                 deployments: BTreeMap::new(),
@@ -452,6 +611,7 @@ mod tests {
     fn extra_service_is_delete() {
         let plan = diff(
             &DesiredState {
+                networks: BTreeMap::new(),
                 project: "demo".into(),
                 services: BTreeMap::new(),
                 deployments: BTreeMap::new(),
@@ -518,6 +678,7 @@ mod tests {
         desired.deployments.insert(
             "web".into(),
             DesiredDeployment {
+                network: None,
                 name: "web".into(),
                 configuration: dep_config("nginx:2"),
                 service_binding: Some(super::super::desired::DesiredServiceBinding {
@@ -541,6 +702,7 @@ mod tests {
         current.deployments.insert(
             "web".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: Uuid::new_v4(),
                 name: "web".into(),
                 configuration: dep_config("nginx:1"),
@@ -568,6 +730,7 @@ mod tests {
         desired.deployments.insert(
             "web".into(),
             DesiredDeployment {
+                network: None,
                 name: "web".into(),
                 configuration: dep_config("nginx:1"),
                 service_binding: Some(super::super::desired::DesiredServiceBinding {
@@ -591,6 +754,7 @@ mod tests {
         current.deployments.insert(
             "web".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: Uuid::new_v4(),
                 name: "web".into(),
                 configuration: dep_config("nginx:1"),
@@ -620,6 +784,7 @@ mod tests {
     #[test]
     fn binding_change_is_deployment_recreate() {
         let mut desired = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -640,6 +805,7 @@ mod tests {
         desired.deployments.insert(
             "dep".into(),
             DesiredDeployment {
+                network: None,
                 name: "dep".into(),
                 configuration: dep_config("img:1"),
                 service_binding: Some(super::super::desired::DesiredServiceBinding {
@@ -668,6 +834,7 @@ mod tests {
         current.deployments.insert(
             "dep".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: Uuid::new_v4(),
                 name: "dep".into(),
                 configuration: dep_config("img:1"),
@@ -694,6 +861,7 @@ mod tests {
     #[test]
     fn missing_deployment_is_create() {
         let mut desired = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -701,6 +869,7 @@ mod tests {
         desired.deployments.insert(
             "worker".into(),
             DesiredDeployment {
+                network: None,
                 name: "worker".into(),
                 configuration: dep_config("worker:1"),
                 service_binding: None,
@@ -710,13 +879,14 @@ mod tests {
         assert!(plan.service_actions.is_empty());
         assert!(matches!(
             plan.deployment_actions.as_slice(),
-            [DeploymentAction::Create(d)] if d.name == "worker"
+            [DeploymentAction::Create { desired, .. }] if desired.name == "worker"
         ));
     }
 
     #[test]
     fn extra_deployment_is_delete() {
         let desired = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -725,6 +895,7 @@ mod tests {
         current.deployments.insert(
             "old-worker".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: Uuid::new_v4(),
                 name: "old-worker".into(),
                 configuration: dep_config("old:1"),
@@ -783,6 +954,7 @@ mod tests {
 
         // ── Desired: stable (no diff) + create + update + recreate ──
         let mut desired = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -815,6 +987,7 @@ mod tests {
         desired.deployments.insert(
             "create-dep".into(),
             DesiredDeployment {
+                network: None,
                 name: "create-dep".into(),
                 configuration: dep_config("nginx:new"),
                 service_binding: Some(DesiredServiceBinding {
@@ -826,6 +999,7 @@ mod tests {
         desired.deployments.insert(
             "update-dep".into(),
             DesiredDeployment {
+                network: None,
                 name: "update-dep".into(),
                 configuration: dep_config("nginx:2"),
                 service_binding: Some(DesiredServiceBinding {
@@ -837,6 +1011,7 @@ mod tests {
         desired.deployments.insert(
             "recreate-dep".into(),
             DesiredDeployment {
+                network: None,
                 name: "recreate-dep".into(),
                 configuration: dep_config("nginx:1"),
                 service_binding: Some(DesiredServiceBinding {
@@ -869,6 +1044,7 @@ mod tests {
         current.deployments.insert(
             "update-dep".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: update_dep_id,
                 name: "update-dep".into(),
                 configuration: dep_config("nginx:1"),
@@ -882,6 +1058,7 @@ mod tests {
         current.deployments.insert(
             "recreate-dep".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: recreate_dep_id,
                 name: "recreate-dep".into(),
                 configuration: dep_config("nginx:1"),
@@ -895,6 +1072,7 @@ mod tests {
         current.deployments.insert(
             "delete-dep".into(),
             CurrentDeployment {
+                network_binding: None,
                 id: delete_dep_id,
                 name: "delete-dep".into(),
                 configuration: dep_config("delete:1"),
@@ -937,7 +1115,7 @@ mod tests {
         assert_eq!(dep_by_name.len(), 4, "{:?}", plan.deployment_actions);
         assert!(matches!(
             dep_by_name["create-dep"],
-            DeploymentAction::Create(_)
+            DeploymentAction::Create { .. }
         ));
         assert!(matches!(
             dep_by_name["update-dep"],
@@ -955,15 +1133,437 @@ mod tests {
             DeploymentAction::Delete(_)
         ));
 
-        // existing_service_ids snapshots every current service so apply can
-        // resolve bindings for unchanged services.
-        assert_eq!(
-            plan.existing_service_ids.get("stable-svc"),
-            Some(&stable_id)
+        // Reference resolution: update-dep's binding to the unchanged
+        // stable-svc carries its uuid; create-dep's and recreate-dep's
+        // bindings to the freshly created create-svc stay Pending until
+        // apply mints the id.
+        match dep_by_name["update-dep"] {
+            DeploymentAction::Update { .. } => {}
+            other => panic!("expected Update, got {other:?}"),
+        }
+        match dep_by_name["create-dep"] {
+            DeploymentAction::Create { service, .. } => assert_eq!(
+                service.as_ref().unwrap().service,
+                ResourceRef::Pending {
+                    name: "create-svc".into()
+                }
+            ),
+            other => panic!("expected Create, got {other:?}"),
+        }
+        let _ = (stable_id, recreate_id);
+    }
+
+    // ── Networks ──
+
+    fn empty_desired() -> DesiredState {
+        DesiredState {
+            project: "demo".into(),
+            services: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+            networks: BTreeMap::new(),
+        }
+    }
+
+    fn desired_network(name: &str, cidr: &str) -> super::super::desired::DesiredNetwork {
+        super::super::desired::DesiredNetwork {
+            name: name.into(),
+            ipv4_cidr: cidr.into(),
+        }
+    }
+
+    fn current_network(id: Uuid, name: &str, cidr: &str) -> CurrentNetwork {
+        CurrentNetwork {
+            id,
+            name: name.into(),
+            ipv4_cidr: cidr.into(),
+        }
+    }
+
+    #[test]
+    fn missing_network_is_create_and_makes_plan_non_empty() {
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.0.0.0/16"),
         );
-        assert_eq!(
-            plan.existing_service_ids.get("recreate-svc"),
-            Some(&recreate_id)
+        let plan = diff(&desired, &CurrentState::empty(), use_env());
+        assert!(matches!(
+            plan.network_actions.as_slice(),
+            [NetworkAction::Create(n)] if n.name == "internal"
+        ));
+        assert!(!plan.is_empty());
+    }
+
+    #[test]
+    fn cidr_change_is_network_recreate() {
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.9.0.0/24"),
         );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        let plan = diff(&desired, &current, use_env());
+        match plan.network_actions.as_slice() {
+            [
+                NetworkAction::Recreate {
+                    current,
+                    desired,
+                    reasons,
+                },
+            ] => {
+                assert_eq!(current.id, net_id);
+                assert_eq!(desired.ipv4_cidr, "10.9.0.0/24");
+                assert!(
+                    reasons.iter().any(|r| matches!(
+                        r,
+                        RecreateReason::ImmutableField {
+                            field: "iprange",
+                            ..
+                        }
+                    )),
+                    "reasons: {reasons:?}"
+                );
+            }
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_network_is_delete() {
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "old".into(),
+            current_network(Uuid::new_v4(), "old", "10.0.0.0/16"),
+        );
+        let plan = diff(&empty_desired(), &current, use_env());
+        assert!(matches!(
+            plan.network_actions.as_slice(),
+            [NetworkAction::Delete(n)] if n.name == "old"
+        ));
+        assert!(!plan.is_empty());
+    }
+
+    #[test]
+    fn network_recreate_cascades_to_dependent_deployment_recreate() {
+        // A CIDR change recreates the network under a NEW uuid, so every
+        // deployment desiring that network must be recreated to pick it up.
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.9.0.0/24"),
+        );
+        desired.deployments.insert(
+            "api".into(),
+            DesiredDeployment {
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network: Some("internal".into()),
+            },
+        );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        current.deployments.insert(
+            "api".into(),
+            CurrentDeployment {
+                id: Uuid::new_v4(),
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network_binding: Some(CurrentNetworkBinding {
+                    network_id: net_id,
+                    network_name: "internal".into(),
+                }),
+            },
+        );
+        let plan = diff(&desired, &current, use_env());
+        match plan.deployment_actions.as_slice() {
+            [DeploymentAction::Recreate { reasons, .. }] => assert!(
+                reasons.iter().any(|r| matches!(
+                    r,
+                    RecreateReason::DependentNetworkRecreated { network_name } if network_name == "internal"
+                )),
+                "reasons: {reasons:?}"
+            ),
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn network_binding_change_is_inplace_deployment_update() {
+        // The backend updates network_id in place (operator rolls instances
+        // zero-downtime), so a binding change alone is an Update — never a
+        // recreate — even with an identical configuration.
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.0.0.0/16"),
+        );
+        desired.deployments.insert(
+            "api".into(),
+            DesiredDeployment {
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network: Some("internal".into()),
+            },
+        );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        current.deployments.insert(
+            "api".into(),
+            CurrentDeployment {
+                id: Uuid::new_v4(),
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network_binding: None, // currently detached
+            },
+        );
+        let plan = diff(&desired, &current, use_env());
+        assert!(plan.network_actions.is_empty(), "network itself unchanged");
+        assert!(
+            matches!(
+                plan.deployment_actions.as_slice(),
+                [DeploymentAction::Update { .. }]
+            ),
+            "expected in-place Update, got {:?}",
+            plan.deployment_actions
+        );
+    }
+
+    #[test]
+    fn unchanged_network_binding_yields_no_deployment_action() {
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.0.0.0/16"),
+        );
+        desired.deployments.insert(
+            "api".into(),
+            DesiredDeployment {
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network: Some("internal".into()),
+            },
+        );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        current.deployments.insert(
+            "api".into(),
+            CurrentDeployment {
+                id: Uuid::new_v4(),
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network_binding: Some(CurrentNetworkBinding {
+                    network_id: net_id,
+                    network_name: "internal".into(),
+                }),
+            },
+        );
+        let plan = diff(&desired, &current, use_env());
+        assert!(plan.is_empty(), "{:?}", plan.deployment_actions);
+    }
+
+    #[test]
+    fn diff_resolves_refs_existing_for_unchanged_pending_for_minted() {
+        // "Resolved as existing" is a plan-time fact: a binding to an
+        // unchanged resource carries its uuid; a binding to a resource this
+        // run creates or recreates stays Pending(name) until apply mints it.
+        let net_id = Uuid::new_v4();
+        let svc_id = Uuid::new_v4();
+
+        let mut desired = empty_desired();
+        // Unchanged network + unchanged service.
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.0.0.0/16"),
+        );
+        desired.services.insert(
+            "web".into(),
+            DesiredService {
+                name: "web".into(),
+                hosts: vec![],
+                region: "dev".into(),
+                configuration: http_config(),
+            },
+        );
+        // A brand-new network referenced by a new deployment.
+        desired
+            .networks
+            .insert("fresh".into(), desired_network("fresh", "10.7.0.0/24"));
+        // New deployment binding to the unchanged service + unchanged network.
+        desired.deployments.insert(
+            "api".into(),
+            DesiredDeployment {
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: Some(super::super::desired::DesiredServiceBinding {
+                    service_name: "web".into(),
+                    target_group: "default".into(),
+                }),
+                network: Some("internal".into()),
+            },
+        );
+        // New deployment binding to the new network.
+        desired.deployments.insert(
+            "worker".into(),
+            DesiredDeployment {
+                name: "worker".into(),
+                configuration: dep_config("w:1"),
+                service_binding: None,
+                network: Some("fresh".into()),
+            },
+        );
+
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        current.services.insert(
+            "web".into(),
+            CurrentService {
+                id: svc_id,
+                name: "web".into(),
+                hosts: vec![],
+                region: "dev".into(),
+                configuration: http_config(),
+            },
+        );
+
+        let plan = diff(&desired, &current, use_env());
+        let by_name: BTreeMap<&str, &DeploymentAction> = plan
+            .deployment_actions
+            .iter()
+            .map(|a| (a.name(), a))
+            .collect();
+
+        match by_name["api"] {
+            DeploymentAction::Create {
+                network, service, ..
+            } => {
+                assert_eq!(
+                    network.as_ref(),
+                    Some(&ResourceRef::Existing {
+                        id: net_id,
+                        name: "internal".into()
+                    }),
+                    "unchanged network resolves at plan time"
+                );
+                let svc = service.as_ref().unwrap();
+                assert_eq!(
+                    svc.service,
+                    ResourceRef::Existing {
+                        id: svc_id,
+                        name: "web".into()
+                    },
+                    "unchanged service resolves at plan time"
+                );
+                assert_eq!(svc.target_group, "default");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+        match by_name["worker"] {
+            DeploymentAction::Create { network, .. } => {
+                assert_eq!(
+                    network.as_ref(),
+                    Some(&ResourceRef::Pending {
+                        name: "fresh".into()
+                    }),
+                    "created-this-run network stays Pending"
+                );
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recreated_network_ref_is_pending_on_dependent_recreate() {
+        // A recreated network mints a NEW uuid during apply, so the dependent
+        // deployment's ref must be Pending — never the doomed old id.
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.9.0.0/24"),
+        );
+        desired.deployments.insert(
+            "api".into(),
+            DesiredDeployment {
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network: Some("internal".into()),
+            },
+        );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        current.deployments.insert(
+            "api".into(),
+            CurrentDeployment {
+                id: Uuid::new_v4(),
+                name: "api".into(),
+                configuration: dep_config("i:1"),
+                service_binding: None,
+                network_binding: Some(CurrentNetworkBinding {
+                    network_id: net_id,
+                    network_name: "internal".into(),
+                }),
+            },
+        );
+        let plan = diff(&desired, &current, use_env());
+        match plan.deployment_actions.as_slice() {
+            [DeploymentAction::Recreate { network, .. }] => {
+                assert_eq!(
+                    network.as_ref(),
+                    Some(&ResourceRef::Pending {
+                        name: "internal".into()
+                    })
+                );
+            }
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unchanged_network_yields_no_action_and_snapshots_id() {
+        let net_id = Uuid::new_v4();
+        let mut desired = empty_desired();
+        desired.networks.insert(
+            "internal".into(),
+            desired_network("internal", "10.0.0.0/16"),
+        );
+        let mut current = CurrentState::empty();
+        current.networks.insert(
+            "internal".into(),
+            current_network(net_id, "internal", "10.0.0.0/16"),
+        );
+        let plan = diff(&desired, &current, use_env());
+        assert!(plan.network_actions.is_empty());
+        assert!(plan.is_empty());
+        let _ = net_id;
     }
 }

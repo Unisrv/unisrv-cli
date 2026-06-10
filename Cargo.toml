@@ -26,6 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
 yapp = "0.5"
+cidr = "0.3"
 
 [dev-dependencies]
 unisrv-api = { path = "api", features = ["test-support"] }

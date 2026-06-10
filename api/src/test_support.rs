@@ -44,6 +44,10 @@ pub struct CallLog {
     pub get_instance_logs_calls: Vec<(Uuid, Uuid)>,
     pub stream_instance_logs_calls: Vec<(Uuid, Uuid)>,
     pub deprovision_instance_calls: Vec<(Uuid, Uuid, Option<InstanceDeprovisionRequest>)>,
+    pub create_network_calls: Vec<(Uuid, CreateInternalNetworkRequest)>,
+    pub delete_network_calls: Vec<(Uuid, Uuid)>,
+    pub list_networks_calls: Vec<Uuid>,
+    pub get_network_calls: Vec<(Uuid, Uuid)>,
     pub list_services_calls: Vec<Uuid>,
     pub get_service_calls: Vec<(Uuid, Uuid)>,
     pub list_deployments_calls: Vec<Uuid>,
@@ -102,6 +106,12 @@ pub struct MockApiClient {
         Mutex<VecDeque<std::result::Result<Vec<LogMessage>, ApiError>>>,
     pub stream_logs_responses: Mutex<VecDeque<StreamLogsResponse>>,
     pub deprovision_instance_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub create_network_responses: Mutex<VecDeque<std::result::Result<NetworkResponse, ApiError>>>,
+    pub delete_network_responses: Mutex<VecDeque<std::result::Result<(), ApiError>>>,
+    pub list_networks_response: ResponseSlot<NetworkListResponse>,
+    /// Queue popped FIFO by each `get_network` call — a queue (not a one-shot
+    /// slot) because the network drain poll gets the same network repeatedly.
+    pub get_network_responses: Mutex<VecDeque<std::result::Result<NetworkResponse, ApiError>>>,
     pub list_services_response: ResponseSlot<ServiceListResponse>,
     pub get_service_responses:
         Mutex<VecDeque<std::result::Result<ServiceDetailResponse, ApiError>>>,
@@ -146,6 +156,10 @@ impl Default for MockApiClient {
             get_instance_logs_responses: Mutex::new(VecDeque::new()),
             stream_logs_responses: Mutex::new(VecDeque::new()),
             deprovision_instance_responses: Mutex::new(VecDeque::new()),
+            create_network_responses: Mutex::new(VecDeque::new()),
+            delete_network_responses: Mutex::new(VecDeque::new()),
+            list_networks_response: ResponseSlot::default(),
+            get_network_responses: Mutex::new(VecDeque::new()),
             list_services_response: ResponseSlot::default(),
             get_service_responses: Mutex::new(VecDeque::new()),
             list_deployments_responses: Mutex::new(VecDeque::new()),
@@ -226,6 +240,37 @@ impl MockApiClient {
         resp: std::result::Result<EnvironmentResponse, ApiError>,
     ) -> Self {
         self.create_environment_response.set(resp);
+        self
+    }
+
+    pub fn push_create_network(self, resp: std::result::Result<NetworkResponse, ApiError>) -> Self {
+        self.create_network_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn push_delete_network(self, resp: std::result::Result<(), ApiError>) -> Self {
+        self.delete_network_responses
+            .lock()
+            .unwrap()
+            .push_back(resp);
+        self
+    }
+
+    pub fn with_list_networks(
+        self,
+        resp: std::result::Result<NetworkListResponse, ApiError>,
+    ) -> Self {
+        self.list_networks_response.set(resp);
+        self
+    }
+
+    /// Queue one `get_network` response. Each call pops the next, so chain
+    /// multiple to script a drain sequence (instances present, then empty).
+    pub fn push_get_network(self, resp: std::result::Result<NetworkResponse, ApiError>) -> Self {
+        self.get_network_responses.lock().unwrap().push_back(resp);
         self
     }
 
@@ -524,7 +569,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("delete_environment_response not configured"))
     }
     async fn provision_instance(
         &self,
@@ -550,7 +595,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("deprovision_instance_response not configured"))
     }
     async fn get_instance(
         &self,
@@ -612,19 +657,51 @@ impl ApiClient for MockApiClient {
     }
     async fn create_network(
         &self,
-        _: Uuid,
-        _: CreateInternalNetworkRequest,
+        env_id: Uuid,
+        req: CreateInternalNetworkRequest,
     ) -> Result<NetworkResponse> {
-        unimplemented!()
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("create_network");
+            calls.create_network_calls.push((env_id, req));
+        }
+        self.create_network_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("create_network_response not configured"))
     }
-    async fn delete_network(&self, _: Uuid, _: Uuid) -> Result<()> {
-        unimplemented!()
+    async fn delete_network(&self, env_id: Uuid, network_id: Uuid) -> Result<()> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("delete_network");
+            calls.delete_network_calls.push((env_id, network_id));
+        }
+        self.delete_network_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("delete_network_response not configured"))
     }
-    async fn list_networks(&self, _: Uuid, _: bool) -> Result<NetworkListResponse> {
-        unimplemented!()
+    async fn list_networks(&self, env_id: Uuid, _: bool) -> Result<NetworkListResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("list_networks");
+            calls.list_networks_calls.push(env_id);
+        }
+        self.list_networks_response.take("list_networks_response")
     }
-    async fn get_network(&self, _: Uuid, _: Uuid) -> Result<NetworkResponse> {
-        unimplemented!()
+    async fn get_network(&self, env_id: Uuid, network_id: Uuid) -> Result<NetworkResponse> {
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.call_order.push("get_network");
+            calls.get_network_calls.push((env_id, network_id));
+        }
+        self.get_network_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("get_network_response not configured"))
     }
     async fn provision_service(
         &self,
@@ -677,7 +754,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("update_service_response not configured"))
     }
     async fn delete_service(&self, env_id: Uuid, service_id: Uuid) -> Result<()> {
         {
@@ -689,7 +766,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("delete_service_response not configured"))
     }
     async fn create_service_target(
         &self,
@@ -823,7 +900,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("update_deployment_response not configured"))
     }
     async fn delete_deployment(&self, env_id: Uuid, deployment_id: Uuid) -> Result<()> {
         {
@@ -835,7 +912,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("delete_deployment_response not configured"))
     }
 
     async fn create_registry(
@@ -893,7 +970,7 @@ impl ApiClient for MockApiClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or_else(|| panic!("delete_registry_response not configured"))
     }
 
     async fn test_registry(&self, id: Uuid) -> Result<TestRegistryResponse> {

@@ -13,7 +13,7 @@ use super::desired::DesiredState;
 use super::env_resolve::{Prompter, resolve as resolve_env};
 use super::fetch::fetch_current_state;
 use super::plan::{EnvAction, diff};
-use super::preflight::{ensure_hosts_ready, validate_host_ownership};
+use super::preflight::{ensure_hosts_ready, validate_host_ownership, validate_network_instances};
 use super::render::{PlanStyles, render};
 use super::vars;
 use crate::config_locate::{CONFIG_FILE, find_config};
@@ -69,6 +69,14 @@ pub async fn run(
 
     let plan = diff(&desired, &current, env_action);
 
+    // A network the plan removes/recreates can never drain if a standalone
+    // instance is attached (up won't stop it). Fail before any mutation.
+    if let EnvAction::Use(env) = &plan.env_action {
+        let step = progress.step(Icon::Network, "Checking networks");
+        validate_network_instances(client, env.id, &plan).await?;
+        step.clear();
+    }
+
     if plan.is_empty() {
         // `console` strips the styling when stdout isn't a terminal, so piped
         // runs still get a clean plain line. Padded with blank lines for room,
@@ -97,7 +105,7 @@ pub async fn run(
         return Ok(());
     }
 
-    apply(plan, client, &hosts, &progress).await?;
+    apply(plan, client, &hosts, &super::apply::RealWaiter, &progress).await?;
     Ok(())
 }
 

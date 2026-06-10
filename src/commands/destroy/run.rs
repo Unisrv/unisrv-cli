@@ -43,6 +43,7 @@ pub async fn run(client: &dyn ApiClient, env_flag: Option<&str>) -> Result<()> {
 
     // Empty desired state → the diff deletes every live service and deployment.
     let desired = DesiredState {
+        networks: BTreeMap::new(),
         project: project.clone(),
         services: BTreeMap::new(),
         deployments: BTreeMap::new(),

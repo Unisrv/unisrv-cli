@@ -9,6 +9,8 @@ pub const DEFAULT_VCPU_RATIO: f64 = 0.25;
 pub const DEFAULT_VCPU_COUNT: u8 = 1;
 pub const DEFAULT_MEMORY_MB: u32 = 256;
 
+pub const DEFAULT_NETWORK_CIDR: &str = "10.0.0.0/16";
+
 pub const DEFAULT_TARGET_GROUP: &str = "default";
 pub const DEFAULT_LOCATION_PATH: &str = "/";
 pub const DEFAULT_ALLOW_HTTP: bool = false;

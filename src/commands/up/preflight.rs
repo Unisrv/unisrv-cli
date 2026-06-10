@@ -143,6 +143,93 @@ pub fn validate_host_ownership(
     Ok(())
 }
 
+/// Reject the plan when a network it deletes or recreates has a *standalone*
+/// instance attached. `up` is deliberately instance-unaware — nothing in the
+/// run (or in the operator's reconciliation) will ever stop such an instance,
+/// so the network delete would block forever; fail before any mutation, while
+/// the environment is still clean. Deployment-owned instances are fine: this
+/// run's deletes/updates (or the operator's ongoing roll) converge them, and
+/// apply's drain wait covers the window.
+pub async fn validate_network_instances(
+    client: &dyn ApiClient,
+    env_id: uuid::Uuid,
+    plan: &crate::commands::up::plan::Plan,
+) -> Result<()> {
+    use crate::commands::up::plan::NetworkAction;
+
+    let doomed: Vec<_> = plan
+        .network_actions
+        .iter()
+        .filter_map(|a| match a {
+            NetworkAction::Recreate { current, .. } => Some(current),
+            NetworkAction::Delete(c) => Some(c),
+            NetworkAction::Create(_) => None,
+        })
+        .collect();
+    if doomed.is_empty() {
+        return Ok(());
+    }
+
+    // One instance-count probe answers the common case (the doomed networks'
+    // instances are already gone, or going, with their deployments). Only a
+    // doomed network that still has instances pays the detail lookups.
+    let probe = client
+        .list_networks(env_id, true)
+        .await
+        .context("failed to list networks")?;
+    let counts: std::collections::BTreeMap<uuid::Uuid, usize> = probe
+        .networks
+        .iter()
+        .map(|n| (n.id, n.instance_count.unwrap_or(0)))
+        .collect();
+    let occupied: Vec<_> = doomed
+        .into_iter()
+        .filter(|n| counts.get(&n.id).copied().unwrap_or(0) > 0)
+        .collect();
+    if occupied.is_empty() {
+        return Ok(());
+    }
+
+    let instances = client.list_instances(env_id).await?;
+    let by_id: std::collections::BTreeMap<uuid::Uuid, _> =
+        instances.instances.into_iter().map(|i| (i.id, i)).collect();
+
+    for net in occupied {
+        let detail = client.get_network(env_id, net.id).await?;
+        let standalone = standalone_instance_names(&detail.instances, &by_id);
+        if !standalone.is_empty() {
+            bail!(
+                "preflight failed: network {:?} must be removed or recreated, but standalone \
+                 instance(s) [{}] are attached to it and `up` will not stop them. Stop them \
+                 first, then rerun. (No changes were made.)",
+                net.name,
+                standalone.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Of the instances attached to a network, the display names of those this
+/// command will never stop. "Standalone blocker" requires positive evidence:
+/// the instance is FOUND in the listing, has no owning deployment, and is not
+/// already `stopping` (Stopping can only transition to Exited/Failed, so it
+/// converges on its own). Everything else is converging: deployment-owned
+/// instances are handled by this run's deletes/updates or the operator's
+/// roll, and an instance missing from the listing is a transient race — never
+/// grounds for telling the user to go stop something.
+pub fn standalone_instance_names(
+    attached: &[unisrv_api::models::InstanceInfo],
+    by_id: &std::collections::BTreeMap<uuid::Uuid, unisrv_api::models::InstanceListEntry>,
+) -> Vec<String> {
+    attached
+        .iter()
+        .filter_map(|a| by_id.get(&a.id))
+        .filter(|i| i.deployment.is_none() && i.state.0 != "stopping")
+        .map(|i| i.name.clone().unwrap_or_else(|| i.id.to_string()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +242,239 @@ mod tests {
 
     use crate::progress::SilentProgress;
 
+    mod network_instances {
+        use super::*;
+        use crate::commands::up::plan::{
+            CurrentNetwork, EnvAction, NetworkAction, Plan, ResolvedEnvironment,
+        };
+        use unisrv_api::models::{
+            DeploymentInfo, InstanceInfo, InstanceListEntry, InstanceListResponse, InstanceState,
+            NetworkResponse,
+        };
+
+        fn plan_with_network_actions(actions: Vec<NetworkAction>) -> Plan {
+            Plan {
+                project: "demo".into(),
+                env_action: EnvAction::Use(ResolvedEnvironment {
+                    id: Uuid::new_v4(),
+                    name: "prod".into(),
+                    project: "demo".into(),
+                    slug: "ab12".into(),
+                }),
+                service_actions: vec![],
+                deployment_actions: vec![],
+                network_actions: actions,
+                instance_stops: vec![],
+            }
+        }
+
+        fn current_net(id: Uuid) -> CurrentNetwork {
+            CurrentNetwork {
+                id,
+                name: "internal".into(),
+                ipv4_cidr: "10.0.0.0/16".into(),
+            }
+        }
+
+        fn net_with_instance(net_id: Uuid, inst_id: Uuid) -> NetworkResponse {
+            NetworkResponse {
+                id: net_id,
+                environment_id: Uuid::new_v4(),
+                name: "internal".into(),
+                ipv4_cidr: "10.0.0.0/16".into(),
+                created_at: NaiveDateTime::default(),
+                instances: vec![InstanceInfo {
+                    id: inst_id,
+                    internal_ip: "10.0.0.1".into(),
+                }],
+            }
+        }
+
+        fn instance_entry(
+            id: Uuid,
+            name: &str,
+            deployment: Option<DeploymentInfo>,
+        ) -> InstanceListEntry {
+            InstanceListEntry {
+                id,
+                name: Some(name.into()),
+                state: InstanceState("running".into()),
+                container_image: "i:1".into(),
+                created_at: NaiveDateTime::default(),
+                deployment,
+            }
+        }
+
+        #[tokio::test]
+        async fn rejects_standalone_instance_on_doomed_network_before_any_mutation() {
+            let env_id = Uuid::new_v4();
+            let net_id = Uuid::new_v4();
+            let inst_id = Uuid::new_v4();
+            let client = MockApiClient::logged_in()
+                .with_list_networks(Ok(unisrv_api::models::NetworkListResponse {
+                    networks: vec![unisrv_api::models::NetworkListItem {
+                        id: net_id,
+                        name: "internal".into(),
+                        ipv4_cidr: "10.0.0.0/16".into(),
+                        instance_count: Some(1),
+                    }],
+                }))
+                .with_list_instances(Ok(InstanceListResponse {
+                    instances: vec![instance_entry(inst_id, "redis-cache", None)],
+                }))
+                .push_get_network(Ok(net_with_instance(net_id, inst_id)));
+
+            let plan = plan_with_network_actions(vec![NetworkAction::Delete(current_net(net_id))]);
+            let err = validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("redis-cache"), "names the instance: {msg}");
+            assert!(msg.contains("internal"), "names the network: {msg}");
+            assert!(msg.contains("standalone"), "explains why: {msg}");
+        }
+
+        #[tokio::test]
+        async fn allows_stopping_standalone_instance_on_doomed_network() {
+            // A standalone instance already in `stopping` converges on its own
+            // (the state machine only allows Stopping → Exited/Failed), so the
+            // drain wait covers it — preflight must not demand user action.
+            let env_id = Uuid::new_v4();
+            let net_id = Uuid::new_v4();
+            let inst_id = Uuid::new_v4();
+            let mut entry = instance_entry(inst_id, "redis-cache", None);
+            entry.state = InstanceState("stopping".into());
+            let client = MockApiClient::logged_in()
+                .with_list_networks(Ok(unisrv_api::models::NetworkListResponse {
+                    networks: vec![unisrv_api::models::NetworkListItem {
+                        id: net_id,
+                        name: "internal".into(),
+                        ipv4_cidr: "10.0.0.0/16".into(),
+                        instance_count: Some(1),
+                    }],
+                }))
+                .with_list_instances(Ok(InstanceListResponse {
+                    instances: vec![entry],
+                }))
+                .push_get_network(Ok(net_with_instance(net_id, inst_id)));
+
+            let plan = plan_with_network_actions(vec![NetworkAction::Delete(current_net(net_id))]);
+            validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn allows_unknown_instance_on_doomed_network() {
+            // An instance attached per get_network but absent from
+            // list_instances is a listing race, not evidence of a standalone
+            // blocker — "standalone" requires positive evidence.
+            let env_id = Uuid::new_v4();
+            let net_id = Uuid::new_v4();
+            let client = MockApiClient::logged_in()
+                .with_list_networks(Ok(unisrv_api::models::NetworkListResponse {
+                    networks: vec![unisrv_api::models::NetworkListItem {
+                        id: net_id,
+                        name: "internal".into(),
+                        ipv4_cidr: "10.0.0.0/16".into(),
+                        instance_count: Some(1),
+                    }],
+                }))
+                .with_list_instances(Ok(InstanceListResponse { instances: vec![] }))
+                .push_get_network(Ok(net_with_instance(net_id, Uuid::new_v4())));
+
+            let plan = plan_with_network_actions(vec![NetworkAction::Delete(current_net(net_id))]);
+            validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn allows_deployment_owned_instances_on_doomed_network() {
+            // Deployment-owned stale instances converge on their own (this
+            // run's deletes/updates or the operator's roll) — the drain poll
+            // handles them; preflight must not reject.
+            let env_id = Uuid::new_v4();
+            let net_id = Uuid::new_v4();
+            let inst_id = Uuid::new_v4();
+            let client = MockApiClient::logged_in()
+                .with_list_networks(Ok(unisrv_api::models::NetworkListResponse {
+                    networks: vec![unisrv_api::models::NetworkListItem {
+                        id: net_id,
+                        name: "internal".into(),
+                        ipv4_cidr: "10.0.0.0/16".into(),
+                        instance_count: Some(1),
+                    }],
+                }))
+                .with_list_instances(Ok(InstanceListResponse {
+                    instances: vec![instance_entry(
+                        inst_id,
+                        "api-0",
+                        Some(DeploymentInfo {
+                            id: Uuid::new_v4(),
+                            name: "api".into(),
+                        }),
+                    )],
+                }))
+                .push_get_network(Ok(net_with_instance(net_id, inst_id)));
+
+            let plan = plan_with_network_actions(vec![NetworkAction::Delete(current_net(net_id))]);
+            validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn skips_detail_checks_when_doomed_networks_have_no_instances() {
+            // The common case: the doomed network's instances are already gone
+            // (their deployments are being deleted in the same plan). One
+            // instance_count probe answers it — no per-network detail fetch,
+            // no instance listing.
+            use unisrv_api::models::{NetworkListItem, NetworkListResponse};
+
+            let env_id = Uuid::new_v4();
+            let net_id = Uuid::new_v4();
+            let client = MockApiClient::logged_in().with_list_networks(Ok(NetworkListResponse {
+                networks: vec![NetworkListItem {
+                    id: net_id,
+                    name: "internal".into(),
+                    ipv4_cidr: "10.0.0.0/16".into(),
+                    instance_count: Some(0),
+                }],
+            }));
+
+            let plan = plan_with_network_actions(vec![NetworkAction::Delete(current_net(net_id))]);
+            validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap();
+
+            let calls = client.calls.lock().unwrap();
+            assert_eq!(calls.list_networks_calls.len(), 1, "exactly one probe");
+            assert!(calls.get_network_calls.is_empty(), "no detail fetch");
+            assert!(calls.list_instances_calls.is_empty(), "no instance listing");
+        }
+
+        #[tokio::test]
+        async fn makes_no_api_calls_when_no_networks_are_doomed() {
+            // Creates don't endanger instances; the common no-network-change
+            // run must not pay any extra API calls.
+            let env_id = Uuid::new_v4();
+            let client = MockApiClient::logged_in();
+            let plan = plan_with_network_actions(vec![NetworkAction::Create(
+                crate::commands::up::desired::DesiredNetwork {
+                    name: "internal".into(),
+                    ipv4_cidr: "10.0.0.0/16".into(),
+                },
+            )]);
+            validate_network_instances(&client, env_id, &plan)
+                .await
+                .unwrap();
+            let calls = client.calls.lock().unwrap();
+            assert!(calls.list_instances_calls.is_empty());
+            assert!(calls.get_network_calls.is_empty());
+        }
+    }
+
     /// A claimed base-domain host: stamped `common_wildcard` at claim, no expiry.
     fn wildcard_host(host: &str) -> HostResponse {
         let mut h = host_with_cert(host, false);
@@ -166,6 +486,7 @@ mod tests {
 
     fn desired_with_hosts(hosts: &[&str]) -> DesiredState {
         let mut s = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),
@@ -350,6 +671,7 @@ mod tests {
         // services' hostnames from it) but must never claim or provision.
         let client = MockApiClient::logged_in().with_list_hosts(Ok(vec![]));
         let desired = DesiredState {
+            networks: BTreeMap::new(),
             project: "demo".into(),
             services: BTreeMap::new(),
             deployments: BTreeMap::new(),

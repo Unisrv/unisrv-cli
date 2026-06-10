@@ -378,8 +378,6 @@ pub struct DeploymentConfiguration {
     pub vcpu_count: u8,
     pub memory_mb: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_port: Option<u16>,
 }
 
@@ -394,11 +392,20 @@ pub struct CreateDeploymentRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<DeploymentServiceBinding>,
+    /// Internal network all instances join. Must reference a network in the
+    /// same environment.
+    #[serde(default)]
+    pub network_id: Option<Uuid>,
     pub configuration: DeploymentConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateDeploymentRequest {
+    /// Complete desired network state, not a partial patch: the backend treats
+    /// an absent field as null (= detach), so this is always serialized — a
+    /// `None` goes out as an explicit null.
+    #[serde(default)]
+    pub network_id: Option<Uuid>,
     pub configuration: DeploymentConfiguration,
 }
 
@@ -449,6 +456,9 @@ pub struct DeploymentDetailResponse {
     pub metadata: serde_json::Value,
     pub service_id: Option<Uuid>,
     pub service_target_group: Option<String>,
+    /// The internal network its instances join, if any.
+    #[serde(default)]
+    pub network_id: Option<Uuid>,
     pub instances: Vec<DeploymentInstanceEntry>,
     pub backoff: Option<BackoffStatus>,
     pub created_at: NaiveDateTime,
@@ -583,6 +593,72 @@ mod tests {
         });
         let h: HostResponse = serde_json::from_value(host).unwrap();
         assert_eq!(h.certificate_type, Some(CertificateType::Unknown));
+    }
+
+    #[test]
+    fn deployment_detail_parses_network_id() {
+        let json = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "api",
+            "state": "in_sync",
+            "configuration": {
+                "replicas": 1,
+                "region": "dev",
+                "container_image": "i:1",
+                "vcpu_ratio": 0.25,
+                "vcpu_count": 1,
+                "memory_mb": 256,
+                "instance_port": 80
+            },
+            "metadata": {},
+            "service_id": null,
+            "service_target_group": null,
+            "network_id": "00000000-0000-0000-0000-00000000000a",
+            "instances": [],
+            "backoff": null,
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00"
+        });
+        let d: DeploymentDetailResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            d.network_id,
+            Some(Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap())
+        );
+    }
+
+    #[test]
+    fn update_deployment_request_always_serializes_network_id() {
+        // The backend treats an ABSENT network_id as null (= detach), so the
+        // CLI must always send the field explicitly — a None must serialize as
+        // a literal null, never be omitted.
+        let req = UpdateDeploymentRequest {
+            network_id: None,
+            configuration: DeploymentConfiguration {
+                replicas: 1,
+                region: "dev".into(),
+                container_image: "i:1".into(),
+                args: None,
+                env: None,
+                vcpu_ratio: 0.25,
+                vcpu_count: 1,
+                memory_mb: 256,
+                instance_port: None,
+            },
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(
+            v.as_object().unwrap().contains_key("network_id"),
+            "network_id must be present (null), not omitted: {v}"
+        );
+        assert!(v["network_id"].is_null());
+        // network is no longer part of the configuration blob.
+        assert!(
+            !v["configuration"]
+                .as_object()
+                .unwrap()
+                .contains_key("network"),
+            "configuration must not carry a network field: {v}"
+        );
     }
 
     #[test]

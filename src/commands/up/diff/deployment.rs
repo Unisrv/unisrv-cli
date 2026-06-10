@@ -23,7 +23,6 @@ pub fn render_config_diff(
         vcpu_ratio: c_vcpu_ratio,
         vcpu_count: c_vcpu_count,
         memory_mb: c_memory_mb,
-        network: c_network,
         instance_port: c_instance_port,
     } = current;
     let DeploymentConfiguration {
@@ -35,7 +34,6 @@ pub fn render_config_diff(
         vcpu_ratio: d_vcpu_ratio,
         vcpu_count: d_vcpu_count,
         memory_mb: d_memory_mb,
-        network: d_network,
         instance_port: d_instance_port,
     } = desired;
 
@@ -69,14 +67,6 @@ pub fn render_config_diff(
     }
     if c_env != d_env {
         render_env_diff(out, c_env.as_ref(), d_env.as_ref());
-    }
-    if c_network != d_network {
-        let _ = writeln!(
-            out,
-            "      network:  {} -> {}",
-            c_network.as_deref().unwrap_or("<unset>"),
-            d_network.as_deref().unwrap_or("<unset>"),
-        );
     }
     if (c_vcpu_count, c_vcpu_ratio, c_memory_mb) != (d_vcpu_count, d_vcpu_ratio, d_memory_mb) {
         let _ = writeln!(
@@ -138,7 +128,6 @@ mod tests {
             vcpu_ratio: 0.25,
             vcpu_count: 1,
             memory_mb: 256,
-            network: None,
             instance_port: Some(80),
         }
     }
@@ -219,16 +208,6 @@ mod tests {
             out.contains("resources: 1vcpu @ 0.25 / 256MB -> 2vcpu @ 0.25 / 512MB"),
             "got: {out}"
         );
-    }
-
-    #[test]
-    fn renders_network_change() {
-        let mut out = String::new();
-        let c = base();
-        let mut d = base();
-        d.network = Some("internal".into());
-        render_config_diff(&mut out, &c, &d);
-        assert!(out.contains("network:  <unset> -> internal"), "got: {out}");
     }
 
     #[test]

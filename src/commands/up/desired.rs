@@ -23,6 +23,14 @@ pub struct DesiredState {
     pub services: BTreeMap<String, DesiredService>,
     /// Keyed by deployment name (HCL block label).
     pub deployments: BTreeMap<String, DesiredDeployment>,
+    /// Keyed by network name (HCL block label).
+    pub networks: BTreeMap<String, DesiredNetwork>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DesiredNetwork {
+    pub name: String,
+    pub ipv4_cidr: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +49,9 @@ pub struct DesiredDeployment {
     pub configuration: DeploymentConfiguration,
     /// Service name (HCL label) this deployment binds to. Resolved to a service_id at apply time.
     pub service_binding: Option<DesiredServiceBinding>,
+    /// Network name (HCL label) whose network all instances join. Resolved to
+    /// a network_id at apply time — the diff compares names only.
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +108,6 @@ impl DesiredState {
                     vcpu_ratio: DEFAULT_VCPU_RATIO,
                     vcpu_count: DEFAULT_VCPU_COUNT,
                     memory_mb: DEFAULT_MEMORY_MB,
-                    network: None,
                     instance_port: block.port,
                 };
                 let service_binding = block.service.map(|svc| DesiredServiceBinding {
@@ -108,8 +118,23 @@ impl DesiredState {
                     name: name.clone(),
                     configuration,
                     service_binding,
+                    network: block.network,
                 };
                 (name, dep)
+            })
+            .collect();
+
+        let networks = cfg
+            .network
+            .into_iter()
+            .map(|(name, block)| {
+                let net = DesiredNetwork {
+                    name: name.clone(),
+                    ipv4_cidr: block
+                        .iprange
+                        .unwrap_or_else(|| DEFAULT_NETWORK_CIDR.to_string()),
+                };
+                (name, net)
             })
             .collect();
 
@@ -117,6 +142,7 @@ impl DesiredState {
             project,
             services,
             deployments,
+            networks,
         }
     }
 }
@@ -193,12 +219,47 @@ deployment "web" {
         assert_eq!(dep.configuration.vcpu_ratio, DEFAULT_VCPU_RATIO);
         assert_eq!(dep.configuration.memory_mb, DEFAULT_MEMORY_MB);
         assert_eq!(dep.configuration.instance_port, Some(8080));
-        assert!(dep.configuration.network.is_none());
         assert!(dep.configuration.args.is_none());
 
         let binding = dep.service_binding.as_ref().unwrap();
         assert_eq!(binding.service_name, "web");
         assert_eq!(binding.target_group, DEFAULT_TARGET_GROUP);
+    }
+
+    #[test]
+    fn network_block_fills_default_cidr_and_deployment_carries_network_name() {
+        let state = parse(
+            r#"
+project = "demo"
+network "internal" {}
+network "backend" { iprange = "10.2.0.0/24" }
+deployment "api" {
+  network = "internal"
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.networks["internal"].name, "internal");
+        assert_eq!(state.networks["internal"].ipv4_cidr, DEFAULT_NETWORK_CIDR);
+        assert_eq!(state.networks["backend"].ipv4_cidr, "10.2.0.0/24");
+        assert_eq!(
+            state.deployments["api"].network.as_deref(),
+            Some("internal")
+        );
+    }
+
+    #[test]
+    fn deployment_without_network_has_none() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "worker" {
+  container { image = "w:1" }
+}
+"#,
+        );
+        assert!(state.deployments["worker"].network.is_none());
+        assert!(state.networks.is_empty());
     }
 
     #[test]

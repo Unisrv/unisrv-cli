@@ -5,7 +5,9 @@ use std::fmt::Write;
 use console::Style;
 
 use super::diff;
-use super::plan::{DeploymentAction, EnvAction, Plan, RecreateReason, ServiceAction};
+use super::plan::{
+    DeploymentAction, EnvAction, NetworkAction, Plan, RecreateReason, ServiceAction,
+};
 
 pub struct PlanStyles {
     pub add: Style,
@@ -81,6 +83,54 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
         }
     }
     let _ = writeln!(out);
+
+    // Networks (rendered first — apply creates them before anything that
+    // references them).
+    for action in &plan.network_actions {
+        match action {
+            NetworkAction::Create(n) => {
+                to_add += 1;
+                let _ = writeln!(
+                    out,
+                    "  {} network {}",
+                    styles.add.apply_to("+"),
+                    styles.bold.apply_to(&n.name)
+                );
+                let _ = writeln!(out, "      iprange: {}", n.ipv4_cidr);
+            }
+            NetworkAction::Recreate {
+                current,
+                desired,
+                reasons,
+            } => {
+                to_recreate += 1;
+                let _ = writeln!(
+                    out,
+                    "  {} network {} {}",
+                    styles.destroy.apply_to("-/+"),
+                    styles.bold.apply_to(&desired.name),
+                    styles
+                        .dim
+                        .apply_to(format!("(recreate — {})", format_reasons(reasons)))
+                );
+                let _ = writeln!(
+                    out,
+                    "      iprange: {} -> {}",
+                    current.ipv4_cidr, desired.ipv4_cidr
+                );
+            }
+            NetworkAction::Delete(n) => {
+                to_destroy += 1;
+                let _ = writeln!(
+                    out,
+                    "  {} network {} {}",
+                    styles.destroy.apply_to("-"),
+                    styles.bold.apply_to(&n.name),
+                    styles.dim.apply_to(format!("(iprange: {})", n.ipv4_cidr))
+                );
+            }
+        }
+    }
 
     // Services.
     for action in &plan.service_actions {
@@ -165,7 +215,7 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
     // Deployments.
     for action in &plan.deployment_actions {
         match action {
-            DeploymentAction::Create(d) => {
+            DeploymentAction::Create { desired: d, .. } => {
                 to_add += 1;
                 let _ = writeln!(
                     out,
@@ -186,6 +236,9 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                         b.service_name, b.target_group
                     );
                 }
+                if let Some(net) = &d.network {
+                    let _ = writeln!(out, "      network:  {net}");
+                }
             }
             DeploymentAction::Update {
                 desired, current, ..
@@ -202,11 +255,13 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                     &current.configuration,
                     &desired.configuration,
                 );
+                render_network_transition(&mut out, current, desired);
             }
             DeploymentAction::Recreate {
                 current,
                 desired,
                 reasons,
+                ..
             } => {
                 to_recreate += 1;
                 let _ = writeln!(
@@ -226,6 +281,9 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                         desired.configuration.container_image
                     );
                 }
+                // A recreate replaces the deployment wholesale, so a network
+                // move/detach rides along — disclose it like Update does.
+                render_network_transition(&mut out, current, desired);
             }
             DeploymentAction::Delete(d) => {
                 to_destroy += 1;
@@ -255,6 +313,29 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
     out
 }
 
+/// Render a deployment's network-binding transition (`a -> b`), if any. The
+/// binding lives outside the configuration blob, so the config diff can't
+/// show it; both the Update and Recreate arms disclose it through this.
+fn render_network_transition(
+    out: &mut String,
+    current: &crate::commands::up::plan::CurrentDeployment,
+    desired: &crate::commands::up::desired::DesiredDeployment,
+) {
+    let c_net = current
+        .network_binding
+        .as_ref()
+        .map(|b| b.network_name.as_str());
+    let d_net = desired.network.as_deref();
+    if c_net != d_net {
+        let _ = writeln!(
+            out,
+            "      network:  {} -> {}",
+            c_net.unwrap_or("<unset>"),
+            d_net.unwrap_or("<unset>"),
+        );
+    }
+}
+
 fn format_reasons(reasons: &[RecreateReason]) -> String {
     reasons
         .iter()
@@ -263,6 +344,9 @@ fn format_reasons(reasons: &[RecreateReason]) -> String {
             RecreateReason::ServiceBindingChanged => "service binding changed".to_string(),
             RecreateReason::DependentServiceRecreated { service_name } => {
                 format!("service {service_name} recreated")
+            }
+            RecreateReason::DependentNetworkRecreated { network_name } => {
+                format!("network {network_name} recreated")
             }
         })
         .collect::<Vec<_>>()
@@ -332,7 +416,6 @@ mod tests {
             vcpu_ratio: 0.25,
             vcpu_count: 1,
             memory_mb: 256,
-            network: None,
             instance_port: Some(80),
         }
     }
@@ -340,6 +423,7 @@ mod tests {
     #[test]
     fn renders_full_create_plan() {
         let plan = Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Create(CreateEnvironmentRequest {
                 project: "demo".into(),
@@ -353,15 +437,19 @@ mod tests {
                 region: "dev".into(),
                 configuration: http_config(),
             })],
-            deployment_actions: vec![DeploymentAction::Create(DesiredDeployment {
-                name: "web".into(),
-                configuration: dep_config("nginx:1"),
-                service_binding: Some(DesiredServiceBinding {
-                    service_name: "web".into(),
-                    target_group: "default".into(),
-                }),
-            })],
-            existing_service_ids: BTreeMap::new(),
+            deployment_actions: vec![DeploymentAction::Create {
+                service: None,
+                network: None,
+                desired: DesiredDeployment {
+                    network: None,
+                    name: "web".into(),
+                    configuration: dep_config("nginx:1"),
+                    service_binding: Some(DesiredServiceBinding {
+                        service_name: "web".into(),
+                        target_group: "default".into(),
+                    }),
+                },
+            }],
             instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
@@ -375,6 +463,7 @@ mod tests {
     #[test]
     fn renders_recreate_with_reason() {
         let plan = Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
@@ -403,7 +492,6 @@ mod tests {
                 }],
             }],
             deployment_actions: vec![],
-            existing_service_ids: BTreeMap::new(),
             instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
@@ -418,6 +506,7 @@ mod tests {
         // Hosts are an unordered set. A recreate triggered by region change with
         // the same hosts in a different order must NOT render a spurious hosts diff.
         let plan = Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
@@ -446,7 +535,6 @@ mod tests {
                 }],
             }],
             deployment_actions: vec![],
-            existing_service_ids: BTreeMap::new(),
             instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
@@ -459,6 +547,7 @@ mod tests {
     #[test]
     fn renders_delete_summary() {
         let plan = Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
@@ -469,13 +558,13 @@ mod tests {
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Delete(
                 crate::commands::up::plan::CurrentDeployment {
+                    network_binding: None,
                     id: Uuid::new_v4(),
                     name: "old".into(),
                     configuration: dep_config("img:1"),
                     service_binding: None,
                 },
             )],
-            existing_service_ids: BTreeMap::new(),
             instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
@@ -497,6 +586,7 @@ mod tests {
         desired_config.replicas = 3;
 
         let plan = Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
                 id: Uuid::new_v4(),
@@ -506,20 +596,22 @@ mod tests {
             }),
             service_actions: vec![],
             deployment_actions: vec![DeploymentAction::Update {
+                network: None,
                 id: Uuid::new_v4(),
                 desired: DesiredDeployment {
+                    network: None,
                     name: "web".into(),
                     configuration: desired_config,
                     service_binding: None,
                 },
                 current: crate::commands::up::plan::CurrentDeployment {
+                    network_binding: None,
                     id: Uuid::new_v4(),
                     name: "web".into(),
                     configuration: current_config,
                     service_binding: None,
                 },
             }],
-            existing_service_ids: BTreeMap::new(),
             instance_stops: vec![],
         };
         let out = render(&plan, &PlanStyles::plain());
@@ -541,6 +633,171 @@ mod tests {
         assert!(out.contains("(base)"));
         assert!(out.contains("https://shop.acme.com"));
         assert!(out.contains("(custom)"));
+    }
+
+    #[test]
+    fn renders_network_actions_with_counts() {
+        use crate::commands::up::desired::DesiredNetwork;
+        use crate::commands::up::plan::{CurrentNetwork, NetworkAction};
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
+                id: Uuid::new_v4(),
+                name: "prod".into(),
+                project: "demo".into(),
+                slug: "ab12".into(),
+            }),
+            service_actions: vec![],
+            deployment_actions: vec![],
+            network_actions: vec![
+                NetworkAction::Create(DesiredNetwork {
+                    name: "internal".into(),
+                    ipv4_cidr: "10.0.0.0/16".into(),
+                }),
+                NetworkAction::Recreate {
+                    current: CurrentNetwork {
+                        id: Uuid::new_v4(),
+                        name: "backend".into(),
+                        ipv4_cidr: "10.1.0.0/16".into(),
+                    },
+                    desired: DesiredNetwork {
+                        name: "backend".into(),
+                        ipv4_cidr: "10.2.0.0/24".into(),
+                    },
+                    reasons: vec![RecreateReason::ImmutableField {
+                        field: "iprange",
+                        old: "10.1.0.0/16".into(),
+                        new: "10.2.0.0/24".into(),
+                    }],
+                },
+                NetworkAction::Delete(CurrentNetwork {
+                    id: Uuid::new_v4(),
+                    name: "old".into(),
+                    ipv4_cidr: "10.3.0.0/16".into(),
+                }),
+            ],
+            instance_stops: vec![],
+        };
+        let out = render(&plan, &PlanStyles::plain());
+        assert!(out.contains("+ network internal"), "got:\n{out}");
+        assert!(out.contains("iprange: 10.0.0.0/16"), "got:\n{out}");
+        assert!(out.contains("-/+ network backend"), "got:\n{out}");
+        assert!(out.contains("iprange changed"), "got:\n{out}");
+        assert!(
+            out.contains("10.1.0.0/16 -> 10.2.0.0/24"),
+            "shows the cidr transition: {out}"
+        );
+        assert!(out.contains("- network old"), "got:\n{out}");
+        assert!(
+            out.contains("1 to add, 0 to change, 1 to recreate, 1 to destroy."),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn deployment_create_and_update_render_network_binding() {
+        use crate::commands::up::plan::CurrentNetworkBinding;
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
+                id: Uuid::new_v4(),
+                name: "prod".into(),
+                project: "demo".into(),
+                slug: "ab12".into(),
+            }),
+            service_actions: vec![],
+            deployment_actions: vec![
+                DeploymentAction::Create {
+                    service: None,
+                    network: None,
+                    desired: DesiredDeployment {
+                        name: "api".into(),
+                        configuration: dep_config("i:1"),
+                        service_binding: None,
+                        network: Some("internal".into()),
+                    },
+                },
+                DeploymentAction::Update {
+                    network: None,
+                    id: Uuid::new_v4(),
+                    desired: DesiredDeployment {
+                        name: "worker".into(),
+                        configuration: dep_config("w:1"),
+                        service_binding: None,
+                        network: Some("internal".into()),
+                    },
+                    current: crate::commands::up::plan::CurrentDeployment {
+                        id: Uuid::new_v4(),
+                        name: "worker".into(),
+                        configuration: dep_config("w:1"),
+                        service_binding: None,
+                        network_binding: Some(CurrentNetworkBinding {
+                            network_id: Uuid::new_v4(),
+                            network_name: "backend".into(),
+                        }),
+                    },
+                },
+            ],
+            network_actions: vec![],
+            instance_stops: vec![],
+        };
+        let out = render(&plan, &PlanStyles::plain());
+        assert!(
+            out.contains("network:  internal"),
+            "create shows network: {out}"
+        );
+        assert!(
+            out.contains("network:  backend -> internal"),
+            "update shows binding change: {out}"
+        );
+    }
+
+    #[test]
+    fn deployment_recreate_renders_network_transition() {
+        // A recreate replaces the deployment wholesale, so a network move or
+        // detach rides along — the plan must disclose it, same as Update does.
+        use crate::commands::up::plan::CurrentNetworkBinding;
+
+        let plan = Plan {
+            project: "demo".into(),
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
+                id: Uuid::new_v4(),
+                name: "prod".into(),
+                project: "demo".into(),
+                slug: "ab12".into(),
+            }),
+            service_actions: vec![],
+            deployment_actions: vec![DeploymentAction::Recreate {
+                network: None,
+                service: None,
+                current: crate::commands::up::plan::CurrentDeployment {
+                    id: Uuid::new_v4(),
+                    name: "api".into(),
+                    configuration: dep_config("i:1"),
+                    service_binding: None,
+                    network_binding: Some(CurrentNetworkBinding {
+                        network_id: Uuid::new_v4(),
+                        network_name: "internal".into(),
+                    }),
+                },
+                desired: DesiredDeployment {
+                    name: "api".into(),
+                    configuration: dep_config("i:1"),
+                    service_binding: None,
+                    network: None, // detached as part of the recreate
+                },
+                reasons: vec![RecreateReason::ServiceBindingChanged],
+            }],
+            network_actions: vec![],
+            instance_stops: vec![],
+        };
+        let out = render(&plan, &PlanStyles::plain());
+        assert!(
+            out.contains("network:  internal -> <unset>"),
+            "recreate must disclose the network transition: {out}"
+        );
     }
 
     #[test]

@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use async_trait::async_trait;
 use unisrv_api::ApiClient;
 use unisrv_api::models::HostResponse;
 use uuid::Uuid;
@@ -27,22 +26,9 @@ use crate::progress::{Icon, Progress, Tone};
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const POLL_MAX_ATTEMPTS: usize = 60;
 
-/// Abstraction over sleeping between polls, so tests can drive the drain loop
-/// without real time passing. Mirrors the `Prompter` seam in `env_resolve`.
-#[async_trait]
-pub trait Waiter {
-    async fn sleep(&self, dur: Duration);
-}
-
-/// Production waiter — backed by the tokio timer.
-pub struct RealWaiter;
-
-#[async_trait]
-impl Waiter for RealWaiter {
-    async fn sleep(&self, dur: Duration) {
-        tokio::time::sleep(dur).await;
-    }
-}
+// The sleep seam lives next to `apply` (which shares it for network drain
+// waits); re-exported here so destroy-side callers keep their import path.
+pub use crate::commands::up::apply::{RealWaiter, Waiter};
 
 /// Execute a destroy plan: apply all deletes, wait for deployments to drain, then
 /// delete the environment. The plan's `env_action` must be `Use` — destroy never
@@ -61,8 +47,9 @@ pub async fn destroy_execute(
         }
     };
 
-    // Issue all the deletes (deployments → services), reusing up's apply.
-    apply(plan, client, hosts, progress).await?;
+    // Issue all the deletes (deployments → services → networks), reusing up's
+    // apply — including its instance-drain-gated network deletes.
+    apply(plan, client, hosts, waiter, progress).await?;
 
     // Deployments delete asynchronously; wait for them to drain before the
     // backend will let us remove the (now-empty) environment.
@@ -84,13 +71,13 @@ pub async fn poll_deployments_drained(
     max_attempts: usize,
     progress: &dyn Progress,
 ) -> Result<()> {
+    use crate::commands::up::apply::{Poll, PollOutcome, poll_until};
+
     let step = progress.step(Icon::Deployment, "Waiting for deployments to drain");
-    for attempt in 0..max_attempts {
+    let outcome = poll_until(waiter, POLL_INTERVAL, max_attempts, &step, async || {
         let list = client.list_deployments(env_id).await?;
         if list.deployments.is_empty() {
-            let elapsed = attempt as u64 * POLL_INTERVAL.as_secs();
-            step.finish(Tone::Remove, &format!("deployments drained ({elapsed}s)"));
-            return Ok(());
+            return Ok(Poll::Done);
         }
         // Every remaining deployment must be on its way out. A deployment in any
         // other state means something created one while we were destroying —
@@ -103,23 +90,30 @@ pub async fn poll_deployments_drained(
                 d.state.0
             );
         }
-        let elapsed = attempt as u64 * POLL_INTERVAL.as_secs();
-        step.update(&format!(
-            "Draining {} deployment(s)… ({elapsed}s)",
+        Ok(Poll::Pending(format!(
+            "Draining {} deployment(s)…",
             list.deployments.len()
-        ));
-        waiter.sleep(POLL_INTERVAL).await;
+        )))
+    })
+    .await?;
+    match outcome {
+        PollOutcome::Done { rounds } => {
+            let elapsed = rounds as u64 * POLL_INTERVAL.as_secs();
+            step.finish(Tone::Remove, &format!("deployments drained ({elapsed}s)"));
+            Ok(())
+        }
+        PollOutcome::TimedOut => bail!(
+            "timed out after {}s waiting for deployments to drain. Rerun `unisrv destroy` to \
+             finish.",
+            max_attempts as u64 * POLL_INTERVAL.as_secs()
+        ),
     }
-    bail!(
-        "timed out after {}s waiting for deployments to drain. Rerun `unisrv destroy` to finish.",
-        max_attempts
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use async_trait::async_trait;
     use std::sync::Mutex;
 
     use chrono::NaiveDateTime;
@@ -179,7 +173,6 @@ mod tests {
             vcpu_ratio: 0.25,
             vcpu_count: 1,
             memory_mb: 256,
-            network: None,
             instance_port: Some(80),
         }
     }
@@ -196,6 +189,7 @@ mod tests {
 
     fn current_deployment(name: &str) -> CurrentDeployment {
         CurrentDeployment {
+            network_binding: None,
             id: Uuid::new_v4(),
             name: name.into(),
             configuration: dep_config(),
@@ -206,6 +200,7 @@ mod tests {
     /// A destroy plan: empty desired → every existing service/deployment is a Delete.
     fn destroy_plan(env_id: Uuid) -> Plan {
         Plan {
+            network_actions: vec![],
             project: "demo".into(),
             env_action: EnvAction::Use(ResolvedEnvironment {
                 id: env_id,
@@ -215,9 +210,67 @@ mod tests {
             }),
             service_actions: vec![ServiceAction::Delete(current_service("web"))],
             deployment_actions: vec![DeploymentAction::Delete(current_deployment("web"))],
-            existing_service_ids: BTreeMap::new(),
             instance_stops: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn destroy_deletes_network_after_stops_and_before_env_delete() {
+        // Networks go last in apply (their blockers can be the standalone
+        // instances the stop pass tears down), and the env delete happens only
+        // after the whole apply — the env CASCADE is a backstop, not the
+        // mechanism.
+        use crate::commands::up::plan::{CurrentNetwork, InstanceStop, NetworkAction};
+        use unisrv_api::models::NetworkResponse;
+
+        let env_id = Uuid::new_v4();
+        let net_id = Uuid::new_v4();
+        let inst_id = Uuid::new_v4();
+
+        let mut plan = destroy_plan(env_id);
+        plan.network_actions = vec![NetworkAction::Delete(CurrentNetwork {
+            id: net_id,
+            name: "internal".into(),
+            ipv4_cidr: "10.0.0.0/16".into(),
+        })];
+        plan.instance_stops = vec![InstanceStop {
+            id: inst_id,
+            name: Some("redis-cache".into()),
+        }];
+
+        let client = MockApiClient::logged_in()
+            .push_delete_deployment(Ok(()))
+            .push_delete_service(Ok(()))
+            .push_deprovision_instance(Ok(()))
+            .push_get_network(Ok(NetworkResponse {
+                id: net_id,
+                environment_id: env_id,
+                name: "internal".into(),
+                ipv4_cidr: "10.0.0.0/16".into(),
+                created_at: NaiveDateTime::default(),
+                instances: vec![],
+            }))
+            .push_delete_network(Ok(()))
+            .with_list_deployments(Ok(empty_deployments()))
+            .push_delete_environment(Ok(()));
+        let waiter = CountingWaiter::new();
+
+        destroy_execute(plan, &client, &[], &waiter, &SilentProgress)
+            .await
+            .unwrap();
+
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.delete_network_calls, vec![(env_id, net_id)]);
+        let order = &calls.call_order;
+        let pos = |n: &str| order.iter().position(|m| *m == n).unwrap();
+        assert!(
+            pos("deprovision_instance") < pos("delete_network"),
+            "{order:?}"
+        );
+        assert!(
+            pos("delete_network") < pos("delete_environment"),
+            "{order:?}"
+        );
     }
 
     fn empty_deployments() -> unisrv_api::models::DeploymentListResponse {
@@ -300,6 +353,8 @@ mod tests {
     async fn aborts_and_keeps_env_when_a_non_deleting_deployment_appears() {
         let env_id = Uuid::new_v4();
         let client = MockApiClient::logged_in()
+            .push_delete_deployment(Ok(()))
+            .push_delete_service(Ok(()))
             // A fresh deployment showed up mid-destroy (someone ran `up`).
             .with_list_deployments(Ok(deployments_in_state("in_sync")))
             .push_delete_environment(Ok(()));

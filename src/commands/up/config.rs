@@ -37,6 +37,17 @@ pub struct UpConfig {
     pub service: BTreeMap<String, ServiceBlock>,
     #[serde(default)]
     pub deployment: BTreeMap<String, DeploymentBlock>,
+    #[serde(default)]
+    pub network: BTreeMap<String, NetworkBlock>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkBlock {
+    /// IPv4 CIDR block for the network (e.g. "10.0.0.0/16"). Optional —
+    /// defaults to [`super::defaults::DEFAULT_NETWORK_CIDR`] downstream.
+    #[serde(default)]
+    pub iprange: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -59,6 +70,10 @@ pub struct DeploymentBlock {
     /// Port that the container listens on. Required when `service` is set.
     #[serde(default)]
     pub port: Option<u16>,
+    /// Name of a `network` block whose network all instances join (optional).
+    /// The referenced network must be defined in this file.
+    #[serde(default)]
+    pub network: Option<String>,
     pub container: ContainerBlock,
 }
 
@@ -209,6 +224,16 @@ impl UpConfig {
                 }
             }
         }
+        for net in self.network.values() {
+            if let Some(iprange) = &net.iprange
+                && let Some(reason) = invalid_ipv4_cidr(iprange)
+            {
+                return Err(err(
+                    reason,
+                    Some(Locator::substring(&format!("\"{iprange}\""))),
+                ));
+            }
+        }
         for (name, dep) in &self.deployment {
             if let Some(svc) = &dep.service {
                 if !self.service.contains_key(svc) {
@@ -227,6 +252,16 @@ impl UpConfig {
                         Some(Locator::substring(&format!("deployment \"{name}\""))),
                     ));
                 }
+            }
+            if let Some(net) = &dep.network
+                && !self.network.contains_key(net)
+            {
+                return Err(err(
+                    format!(
+                        "deployment \"{name}\" references network \"{net}\" which is not defined"
+                    ),
+                    Some(Locator::substring(&format!("\"{net}\""))),
+                ));
             }
         }
         Ok(())
@@ -279,6 +314,30 @@ fn var_object(vars: &BTreeMap<String, String>) -> hcl::Value {
             .map(|(k, v)| (k.clone(), hcl::Value::from(v.clone())))
             .collect(),
     )
+}
+
+/// Returns an error message if `iprange` is not a valid IPv4 CIDR block, else
+/// `None`. Parses with the same `cidr` crate as the backend, so the CLI and
+/// server agree exactly on what's accepted — notably, host bits must be zero
+/// (`10.0.0.5/16` is rejected, `10.0.0.0/16` is fine).
+fn invalid_ipv4_cidr(iprange: &str) -> Option<String> {
+    let err = match iprange.parse::<cidr::Ipv4Cidr>() {
+        Ok(_) => return None,
+        Err(e) => e,
+    };
+    // `Ipv4Inet` accepts host bits where `Ipv4Cidr` doesn't; if it parses,
+    // the only problem is non-zero host bits, so offer the masked address.
+    match iprange.parse::<cidr::Ipv4Inet>() {
+        Ok(inet) => {
+            let net = inet.network();
+            Some(format!(
+                "{iprange:?} is not a network address (host bits are set) — did you mean \"{net}\"?"
+            ))
+        }
+        Err(_) => Some(format!(
+            "{iprange:?} is not a valid IPv4 CIDR block (e.g. \"10.0.0.0/16\"): {err}"
+        )),
+    }
 }
 
 /// The platform base domain. Custom hosts under it are served by a wildcard
@@ -897,6 +956,86 @@ deployment "" {
         let msg = format!("{err:#}");
         assert!(msg.contains("empty label"), "error was: {msg}");
         assert!(msg.contains("deployment"), "error was: {msg}");
+    }
+
+    #[test]
+    fn parses_network_block_with_iprange() {
+        let src = r#"
+project = "demo"
+network "internal" {
+  iprange = "10.1.0.0/24"
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert_eq!(cfg.network.len(), 1);
+        assert_eq!(
+            cfg.network["internal"].iprange.as_deref(),
+            Some("10.1.0.0/24")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_iprange() {
+        let src = r#"
+project = "demo"
+network "internal" {
+  iprange = "not-a-cidr"
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not-a-cidr"), "should name the value: {msg}");
+        assert!(msg.contains("CIDR"), "should explain the rule: {msg}");
+    }
+
+    #[test]
+    fn rejects_non_canonical_iprange_suggesting_network_address() {
+        // Host bits must be zero (the backend's cidr parse enforces the same),
+        // and the error should offer the masked network address as a fix.
+        let src = r#"
+project = "demo"
+network "internal" {
+  iprange = "10.0.0.5/16"
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("10.0.0.5/16"), "names the value: {msg}");
+        assert!(
+            msg.contains("did you mean \"10.0.0.0/16\""),
+            "suggests the canonical network address: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_deployment_referencing_undefined_network() {
+        let src = r#"
+project = "x"
+deployment "d" {
+  network = "ghost"
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost"), "names the network: {msg}");
+        assert!(msg.contains("not defined"), "explains the rule: {msg}");
+    }
+
+    #[test]
+    fn parses_deployment_network_reference() {
+        let src = r#"
+project = "x"
+network "internal" {}
+deployment "d" {
+  network = "internal"
+  container { image = "i" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert_eq!(cfg.deployment["d"].network.as_deref(), Some("internal"));
+        // A bare network block (no iprange) is valid — the default fills in.
+        assert!(cfg.network["internal"].iprange.is_none());
     }
 
     #[test]
