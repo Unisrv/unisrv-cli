@@ -143,14 +143,19 @@ impl DesiredState {
             .into_iter()
             .map(|(name, block)| {
                 let configuration = DeploymentConfiguration {
-                    replicas: DEFAULT_REPLICAS,
+                    replicas: block.replicas.map(|r| r as u32).unwrap_or(DEFAULT_REPLICAS),
                     region: DEFAULT_REGION.to_string(),
                     container_image: block.container.image,
                     args: block.container.args,
                     env: block.container.env,
-                    vcpu_ratio: DEFAULT_VCPU_RATIO,
-                    vcpu_count: DEFAULT_VCPU_COUNT,
-                    memory_mb: DEFAULT_MEMORY_MB,
+                    vcpu_ratio: block.vcpu_ratio.unwrap_or(DEFAULT_VCPU_RATIO),
+                    vcpu_count: block.vcpus.map(|v| v as u8).unwrap_or(DEFAULT_VCPU_COUNT),
+                    memory_mb: block
+                        .memory
+                        .map(|m| {
+                            m.to_mb().expect("validation guarantees a parseable memory") as u32
+                        })
+                        .unwrap_or(DEFAULT_MEMORY_MB),
                     instance_port: block.port,
                 };
                 let service_binding = bindings.remove(&name);
@@ -442,6 +447,137 @@ deployment "worker" {
         let dep = &state.deployments["worker"];
         assert!(dep.service_binding.is_none());
         assert!(dep.configuration.instance_port.is_none());
+    }
+
+    #[test]
+    fn vcpus_attribute_sets_vcpu_count() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  vcpus = 2
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.vcpu_count, 2);
+    }
+
+    #[test]
+    fn bare_integer_memory_is_megabytes() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  memory = 512
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.memory_mb, 512);
+    }
+
+    #[test]
+    fn all_resource_attributes_flow_through_together() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  vcpus      = 4
+  vcpu_ratio = 0.125
+  memory     = "2GB"
+  replicas   = 2
+  container { image = "i:1" }
+}
+"#,
+        );
+        let cfg = &state.deployments["api"].configuration;
+        assert_eq!(cfg.vcpu_count, 4);
+        assert_eq!(cfg.vcpu_ratio, 0.125);
+        assert_eq!(cfg.memory_mb, 2048);
+        assert_eq!(cfg.replicas, 2);
+    }
+
+    #[test]
+    fn unspecified_memory_defaults_to_512mb() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.memory_mb, 512);
+    }
+
+    #[test]
+    fn replicas_attribute_flows_through() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  replicas = 3
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.replicas, 3);
+    }
+
+    #[test]
+    fn vcpu_ratio_attribute_flows_through() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  vcpu_ratio = 0.5
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.vcpu_ratio, 0.5);
+    }
+
+    #[test]
+    fn memory_string_accepts_unit_variants() {
+        // Case-insensitive MB/M/GB/G, binary units, fractional GB landing on
+        // whole MB. Pins the accepted spellings.
+        for (spec, mb) in [
+            ("512MB", 512),
+            ("512M", 512),
+            ("2g", 2048),
+            ("1gb", 1024),
+            ("1.5GB", 1536),
+        ] {
+            let state = parse(&format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  memory = "{spec}"
+  container {{ image = "i:1" }}
+}}
+"#
+            ));
+            assert_eq!(
+                state.deployments["api"].configuration.memory_mb, mb,
+                "spec {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_string_with_gb_suffix_converts_to_mb() {
+        let state = parse(
+            r#"
+project = "demo"
+deployment "api" {
+  memory = "1GB"
+  container { image = "i:1" }
+}
+"#,
+        );
+        assert_eq!(state.deployments["api"].configuration.memory_mb, 1024);
     }
 
     #[test]

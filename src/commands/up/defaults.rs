@@ -7,7 +7,7 @@ pub const DEFAULT_REGION: &str = "dev";
 pub const DEFAULT_REPLICAS: u32 = 1;
 pub const DEFAULT_VCPU_RATIO: f64 = 0.25;
 pub const DEFAULT_VCPU_COUNT: u8 = 1;
-pub const DEFAULT_MEMORY_MB: u32 = 256;
+pub const DEFAULT_MEMORY_MB: u32 = 512;
 
 pub const DEFAULT_NETWORK_CIDR: &str = "10.0.0.0/16";
 

@@ -71,9 +71,20 @@ pub fn render_config_diff(
     if (c_vcpu_count, c_vcpu_ratio, c_memory_mb) != (d_vcpu_count, d_vcpu_ratio, d_memory_mb) {
         let _ = writeln!(
             out,
-            "      resources: {c_vcpu_count}vcpu @ {c_vcpu_ratio} / {c_memory_mb}MB -> {d_vcpu_count}vcpu @ {d_vcpu_ratio} / {d_memory_mb}MB"
+            "      resources: {} -> {}",
+            resources_display(current),
+            resources_display(desired)
         );
     }
+}
+
+/// One-line resource summary ("2vcpu @ 0.5 / 1024MB"), shared by the update
+/// diff above and the create rendering so the two never drift in format.
+pub fn resources_display(cfg: &DeploymentConfiguration) -> String {
+    format!(
+        "{}vcpu @ {} / {}MB",
+        cfg.vcpu_count, cfg.vcpu_ratio, cfg.memory_mb
+    )
 }
 
 fn opt_display<T: std::fmt::Display>(v: Option<&T>) -> String {

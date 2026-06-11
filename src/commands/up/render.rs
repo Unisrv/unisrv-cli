@@ -226,6 +226,11 @@ pub fn render(plan: &Plan, styles: &PlanStyles) -> String {
                 let _ = writeln!(out, "      image:    {}", d.configuration.container_image);
                 let _ = writeln!(out, "      replicas: {}", d.configuration.replicas);
                 let _ = writeln!(out, "      region:   {}", d.configuration.region);
+                let _ = writeln!(
+                    out,
+                    "      resources: {}",
+                    diff::deployment::resources_display(&d.configuration)
+                );
                 if let Some(p) = d.configuration.instance_port {
                     let _ = writeln!(out, "      port:     {p}");
                 }
@@ -458,6 +463,41 @@ mod tests {
         assert!(out.contains("+ deployment web"));
         assert!(out.contains("image:    nginx:1"));
         assert!(out.contains("3 to add, 0 to change, 0 to recreate, 0 to destroy."));
+    }
+
+    #[test]
+    fn create_plan_shows_resources() {
+        let mut config = dep_config("nginx:1");
+        config.vcpu_count = 2;
+        config.vcpu_ratio = 0.5;
+        config.memory_mb = 1024;
+        let plan = Plan {
+            network_actions: vec![],
+            project: "demo".into(),
+            env_action: EnvAction::Use(crate::commands::up::plan::ResolvedEnvironment {
+                id: Uuid::new_v4(),
+                name: "prod".into(),
+                project: "demo".into(),
+                slug: "ab12".into(),
+            }),
+            service_actions: vec![],
+            deployment_actions: vec![DeploymentAction::Create {
+                service: None,
+                network: None,
+                desired: DesiredDeployment {
+                    network: None,
+                    name: "web".into(),
+                    configuration: config,
+                    service_binding: None,
+                },
+            }],
+            instance_stops: vec![],
+        };
+        let out = render(&plan, &PlanStyles::plain());
+        assert!(
+            out.contains("resources: 2vcpu @ 0.5 / 1024MB"),
+            "got: {out}"
+        );
     }
 
     #[test]

@@ -185,7 +185,80 @@ pub struct DeploymentBlock {
     /// The referenced network must be defined in this file.
     #[serde(default)]
     pub network: Option<String>,
+    /// Number of vCPUs per instance (1–32). Optional — defaults to
+    /// [`super::defaults::DEFAULT_VCPU_COUNT`]. Parsed wide; `validate`
+    /// enforces the range, so post-validation consumers may narrow.
+    #[serde(default)]
+    pub vcpus: Option<u64>,
+    /// Guaranteed share of a physical core per vCPU. Optional — defaults to
+    /// [`super::defaults::DEFAULT_VCPU_RATIO`]; `validate` restricts it to the
+    /// scheduler's discrete tiers.
+    #[serde(default)]
+    pub vcpu_ratio: Option<f64>,
+    /// Number of instances to run (0–10; 0 keeps the deployment defined but
+    /// runs nothing). Optional — defaults to
+    /// [`super::defaults::DEFAULT_REPLICAS`].
+    #[serde(default)]
+    pub replicas: Option<u64>,
+    /// Memory per instance (128MB–32GB). A bare number is megabytes; a string
+    /// takes an MB/M/GB/G suffix ("512MB", "2G"). Optional — defaults to
+    /// [`super::defaults::DEFAULT_MEMORY_MB`].
+    #[serde(default)]
+    pub memory: Option<MemoryAttr>,
     pub container: ContainerBlock,
+}
+
+/// The `memory` attribute as written: HCL allows a bare number (megabytes) or
+/// a human-readable string with a unit suffix. [`Self::to_mb`] is the single
+/// conversion; `validate` runs it so post-validation consumers may `expect`.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(
+    untagged,
+    expecting = "a number of MB or a string like \"512MB\" or \"2GB\""
+)]
+pub enum MemoryAttr {
+    /// Bare number: megabytes.
+    Mb(u64),
+    /// String with a unit suffix, e.g. "512MB", "512M", "2GB", "2g".
+    Spec(String),
+}
+
+impl MemoryAttr {
+    /// Megabytes, or a message explaining why the spec doesn't parse. Units
+    /// are binary (1GB = 1024MB), case-insensitive; a fractional value is fine
+    /// as long as it lands on a whole number of MB ("1.5GB" = 1536).
+    pub fn to_mb(&self) -> Result<u64, String> {
+        let spec = match self {
+            MemoryAttr::Mb(mb) => return Ok(*mb),
+            MemoryAttr::Spec(s) => s,
+        };
+        let upper = spec.trim().to_ascii_uppercase();
+        let (number, factor) = if let Some(n) = upper.strip_suffix("MB") {
+            (n, 1.0)
+        } else if let Some(n) = upper.strip_suffix("GB") {
+            (n, 1024.0)
+        } else if let Some(n) = upper.strip_suffix('M') {
+            (n, 1.0)
+        } else if let Some(n) = upper.strip_suffix('G') {
+            (n, 1024.0)
+        } else {
+            return Err(format!(
+                "{spec:?} has no unit suffix; write a string like \"512MB\" or \"2GB\" \
+                 (or a bare number of MB)"
+            ));
+        };
+        let value: f64 = number.trim_end().parse().map_err(|_| {
+            format!("{spec:?} is not a valid memory size (e.g. \"512MB\", \"1.5GB\")")
+        })?;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("{spec:?} must be a positive memory size"));
+        }
+        let mb = value * factor;
+        if mb.fract() != 0.0 {
+            return Err(format!("{spec:?} is not a whole number of MB ({mb}MB)"));
+        }
+        Ok(mb as u64)
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -481,6 +554,61 @@ impl UpConfig {
                     Some(Locator::substring(&format!("\"{net}\""))),
                 ));
             }
+            if let Some(vcpus) = dep.vcpus
+                && !(MIN_VCPUS..=MAX_VCPUS).contains(&vcpus)
+            {
+                return Err(err(
+                    format!(
+                        "`vcpus` in deployment \"{name}\" must be between 1 and 32, got {vcpus}"
+                    ),
+                    Some(Locator::substring(&vcpus.to_string())),
+                ));
+            }
+            if let Some(replicas) = dep.replicas
+                && replicas > MAX_REPLICAS
+            {
+                return Err(err(
+                    format!(
+                        "`replicas` in deployment \"{name}\" must be between 0 and 10, got {replicas}"
+                    ),
+                    Some(Locator::substring(&replicas.to_string())),
+                ));
+            }
+            if let Some(ratio) = dep.vcpu_ratio
+                && !VCPU_RATIO_TIERS.contains(&ratio)
+            {
+                return Err(err(
+                    format!(
+                        "`vcpu_ratio` in deployment \"{name}\" must be one of 0.125, 0.25, 0.5 \
+                         or 1.0, got {ratio}"
+                    ),
+                    Some(Locator::substring("vcpu_ratio")),
+                ));
+            }
+            if let Some(memory) = &dep.memory {
+                let needle = match memory {
+                    MemoryAttr::Spec(s) => format!("\"{s}\""),
+                    MemoryAttr::Mb(n) => n.to_string(),
+                };
+                match memory.to_mb() {
+                    Err(reason) => {
+                        return Err(err(
+                            format!("`memory` in deployment \"{name}\": {reason}"),
+                            Some(Locator::substring(&needle)),
+                        ));
+                    }
+                    Ok(mb) if !(MIN_MEMORY_MB..=MAX_MEMORY_MB).contains(&mb) => {
+                        return Err(err(
+                            format!(
+                                "`memory` in deployment \"{name}\" must be between 128MB and \
+                                 32GB, got {mb}MB"
+                            ),
+                            Some(Locator::substring(&needle)),
+                        ));
+                    }
+                    Ok(_) => {}
+                }
+            }
         }
         Ok(())
     }
@@ -627,6 +755,18 @@ fn invalid_ipv4_cidr(iprange: &str) -> Option<String> {
         )),
     }
 }
+
+/// Per-instance resource bounds, mirroring the scheduler's limits so the CLI
+/// fails fast with a source span instead of waiting for an API 400.
+const MIN_MEMORY_MB: u64 = 128;
+const MAX_MEMORY_MB: u64 = 32 * 1024;
+const MIN_VCPUS: u64 = 1;
+const MAX_VCPUS: u64 = 32;
+/// Discrete core-share tiers the scheduler supports. All powers of two, so
+/// exact f64 comparison is sound.
+const VCPU_RATIO_TIERS: [f64; 4] = [0.125, 0.25, 0.5, 1.0];
+/// 0 is allowed: the deployment stays defined but runs no instances.
+const MAX_REPLICAS: u64 = 10;
 
 /// The platform base domain. Custom hosts under it are served by a wildcard
 /// certificate and, to avoid colliding with derived base hosts
@@ -1330,7 +1470,10 @@ service "web" {
         let err = UpConfig::parse(src).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("override_404"), "names the field: {msg}");
-        assert!(msg.contains("//"), "explains the double-slash problem: {msg}");
+        assert!(
+            msg.contains("//"),
+            "explains the double-slash problem: {msg}"
+        );
     }
 
     #[test]
@@ -1748,6 +1891,195 @@ deployment "d" {
         assert_eq!(cfg.deployment["d"].network.as_deref(), Some("internal"));
         // A bare network block (no iprange) is valid — the default fills in.
         assert!(cfg.network["internal"].iprange.is_none());
+    }
+
+    #[test]
+    fn memory_type_mismatch_error_shows_expected_shapes() {
+        // An untagged-enum miss must not leak "did not match any variant";
+        // the user should see what `memory` accepts.
+        let src = r#"
+project = "demo"
+deployment "api" {
+  memory = true
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("512MB"), "shows the expected shape: {msg}");
+        assert!(!msg.contains("untagged"), "no serde internals: {msg}");
+    }
+
+    #[test]
+    fn rejects_unparseable_memory_specs() {
+        for (spec, why) in [
+            ("512XB", "unknown unit"),
+            ("512", "string without unit"),
+            ("1.3GB", "not a whole number of MB"),
+            ("MB", "no number"),
+            ("-1GB", "negative"),
+        ] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  memory = "{spec}"
+  container {{ image = "i" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(spec), "({why}) should name the value: {msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_memory_out_of_bounds() {
+        for spec in ["64", "\"127MB\"", "\"33GB\""] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  memory = {spec}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("128MB") && msg.contains("32GB"),
+                "({spec}) should state the bounds: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_memory_at_bounds() {
+        for spec in ["128", "\"128MB\"", "\"32GB\""] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  memory = {spec}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            assert!(UpConfig::parse(&src).is_ok(), "({spec}) should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_vcpus_out_of_bounds() {
+        for n in [0, 33] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  vcpus = {n}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("between 1 and 32"),
+                "({n}) should state the bounds: {msg}"
+            );
+            assert!(msg.contains("vcpus"), "({n}) should name the field: {msg}");
+        }
+    }
+
+    #[test]
+    fn accepts_vcpus_at_bounds() {
+        for n in [1, 32] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  vcpus = {n}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            assert!(UpConfig::parse(&src).is_ok(), "({n}) should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_vcpu_ratio_off_tier() {
+        for r in ["0.3", "0.0", "2.0"] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  vcpu_ratio = {r}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("vcpu_ratio"), "({r}) names the field: {msg}");
+            assert!(
+                msg.contains("0.125")
+                    && msg.contains("0.25")
+                    && msg.contains("0.5")
+                    && msg.contains('1'),
+                "({r}) should list the valid tiers: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_all_vcpu_ratio_tiers() {
+        // `1` (integer literal) must coerce like `1.0` — users will write both.
+        for r in ["0.125", "0.25", "0.5", "1.0", "1"] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  vcpu_ratio = {r}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            assert!(UpConfig::parse(&src).is_ok(), "({r}) should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_replicas_above_bound() {
+        let src = r#"
+project = "demo"
+deployment "api" {
+  replicas = 11
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("replicas"), "names the field: {msg}");
+        assert!(msg.contains("between 0 and 10"), "states the bounds: {msg}");
+    }
+
+    #[test]
+    fn accepts_replicas_at_bounds_including_scale_to_zero() {
+        for n in [0, 10] {
+            let src = format!(
+                r#"
+project = "demo"
+deployment "api" {{
+  replicas = {n}
+  container {{ image = "i" }}
+}}
+"#
+            );
+            assert!(UpConfig::parse(&src).is_ok(), "({n}) should be valid");
+        }
     }
 
     #[test]
