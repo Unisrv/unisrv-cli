@@ -7,10 +7,12 @@
 
 use anyhow::{Context, Result};
 use hcl::eval::Evaluate;
+use indexmap::IndexMap;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use super::defaults::DEFAULT_LOCATION_PATH;
 use super::parse_error::{ConfigParseError, Locator};
 
 /// Outcome of resolving a config against a set of interpolation variables.
@@ -58,16 +60,125 @@ pub struct ServiceBlock {
     /// regardless of this list.
     #[serde(default)]
     pub hosts: Option<Vec<String>>,
+    /// Serve plain HTTP as well as HTTPS. Off by default: HTTP requests are
+    /// permanently redirected to HTTPS instead.
+    #[serde(default)]
+    pub allow_http: Option<bool>,
+    /// Shorthand for `location "/" { deployment = "…" }`. Desugars to a
+    /// catch-all appended *after* every explicit location, so it never shadows
+    /// them under the proxy's first-match-wins order.
+    #[serde(default)]
+    pub deployment: Option<String>,
+    /// Routing table, keyed by path prefix (the block label). Declaration order
+    /// is preserved — the proxy matches locations one by one, first match wins.
+    #[serde(default, rename = "location")]
+    pub locations: IndexMap<String, LocationBlock>,
+}
+
+/// A `location "PATH" { … }` block inside a service: routes requests whose path
+/// starts with PATH to exactly one target — a deployment reference, a raw
+/// instance group, or an external URL.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LocationBlock {
+    /// Name of a `deployment` block to route to. The reference *is* the service
+    /// binding: the deployment joins the instance group named after it.
+    #[serde(default)]
+    pub deployment: Option<String>,
+    /// Raw instance-group name to route to, without binding any deployment.
+    /// Escape hatch for groups populated out-of-band (instances API).
+    #[serde(default)]
+    pub instance_group: Option<String>,
+    /// External URL to proxy to. Unlike instance targets, the location's path
+    /// prefix is stripped before forwarding.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Path (plus optional query) to re-route to within the same target when
+    /// the upstream responds 404 — e.g. "/index.html" for SPA fallback.
+    #[serde(default)]
+    pub override_404: Option<String>,
+}
+
+/// The single resolved target of a location. A [`LocationBlock`] is parsed with
+/// three optional target attributes; validation requires exactly one, and this
+/// enum is that choice — making "exactly one" unrepresentable past the boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LocationTarget {
+    /// Route to (and bind) the named deployment's instance group.
+    Deployment(String),
+    /// Route to a raw instance group without binding any deployment.
+    InstanceGroup(String),
+    /// Proxy to an external URL.
+    Url(String),
+}
+
+/// A location after desugaring: a service's explicit `location` blocks in
+/// declaration order, followed by the `deployment` shorthand as a catch-all
+/// "/" appended last. Both `validate` and `DesiredState::from_config` consume
+/// this single representation so they never drift on routing semantics.
+#[derive(Debug)]
+pub struct ResolvedLocation<'a> {
+    pub path: &'a str,
+    pub override_404: Option<&'a str>,
+    /// `None` only for a malformed location that does not set exactly one
+    /// target — a state `validate` rejects, so post-validation consumers
+    /// (`from_config`) may `expect` it.
+    pub target: Option<LocationTarget>,
+}
+
+impl LocationBlock {
+    /// The single resolved target, or `None` when not exactly one of
+    /// `deployment`/`instance_group`/`url` is set.
+    fn target(&self) -> Option<LocationTarget> {
+        match (&self.deployment, &self.instance_group, &self.url) {
+            (Some(d), None, None) => Some(LocationTarget::Deployment(d.clone())),
+            (None, Some(g), None) => Some(LocationTarget::InstanceGroup(g.clone())),
+            (None, None, Some(u)) => Some(LocationTarget::Url(u.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl ServiceBlock {
+    /// The service's routing table, desugared: explicit locations in
+    /// declaration order, then the `deployment` shorthand as a catch-all "/"
+    /// appended last (first-match-wins, so it never shadows explicit routes).
+    pub fn resolved_locations(&self) -> Vec<ResolvedLocation<'_>> {
+        let mut out: Vec<ResolvedLocation<'_>> = self
+            .locations
+            .iter()
+            .map(|(path, loc)| ResolvedLocation {
+                path,
+                override_404: loc.override_404.as_deref(),
+                target: loc.target(),
+            })
+            .collect();
+        if let Some(dep) = &self.deployment {
+            out.push(ResolvedLocation {
+                path: DEFAULT_LOCATION_PATH,
+                override_404: None,
+                target: Some(LocationTarget::Deployment(dep.clone())),
+            });
+        }
+        out
+    }
+
+    /// Deployment names this service routes to — and therefore binds: explicit
+    /// `location` deployment refs plus the `deployment` shorthand. The single
+    /// source of truth for service→deployment bindings.
+    pub fn referenced_deployments(&self) -> impl Iterator<Item = &str> {
+        self.locations
+            .values()
+            .filter_map(|loc| loc.deployment.as_deref())
+            .chain(self.deployment.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentBlock {
-    /// Name of a `service` block this deployment binds to (optional — bare
-    /// deployments without a service-fronting are valid).
-    #[serde(default)]
-    pub service: Option<String>,
-    /// Port that the container listens on. Required when `service` is set.
+    /// Port that the container listens on. Required when a service location
+    /// references this deployment.
     #[serde(default)]
     pub port: Option<u16>,
     /// Name of a `network` block whose network all instances join (optional).
@@ -194,6 +305,26 @@ impl UpConfig {
         Self::parse_project_at(path, &source)
     }
 
+    /// Non-fatal warnings about a *valid* config that is probably not what the
+    /// user meant. Printed by `up` before planning; never blocks an apply.
+    pub fn lints(&self) -> Vec<String> {
+        let mut lints = Vec::new();
+        for (svc_name, svc) in &self.service {
+            for (path, loc) in &svc.locations {
+                if let Some(group) = &loc.instance_group
+                    && self.deployment.contains_key(group)
+                {
+                    lints.push(format!(
+                        "location \"{path}\" in service \"{svc_name}\" routes to instance_group \
+                         \"{group}\", which matches a deployment block but does not bind it — \
+                         use `deployment = \"{group}\"` if you meant to route to that deployment"
+                    ));
+                }
+            }
+        }
+        lints
+    }
+
     fn validate(&self, path: &Path, source: &str) -> Result<(), ConfigParseError> {
         let err = |msg, loc| ConfigParseError::validation(path, source, msg, loc);
         if self.project.trim().is_empty() {
@@ -224,6 +355,111 @@ impl UpConfig {
                 }
             }
         }
+        for (svc_name, svc) in &self.service {
+            // The shorthand `deployment` is desugared into this list (a "/"
+            // catch-all appended last), so every check below sees the same
+            // routing table the proxy and `from_config` will.
+            let resolved = svc.resolved_locations();
+            for loc in &resolved {
+                let path = loc.path;
+                if let Some(reason) = invalid_location_path(path) {
+                    return Err(err(
+                        format!("location \"{path}\" in service \"{svc_name}\": {reason}"),
+                        Some(Locator::substring(&format!("location \"{path}\""))),
+                    ));
+                }
+                let Some(target) = &loc.target else {
+                    return Err(err(
+                        format!(
+                            "location \"{path}\" in service \"{svc_name}\" must have exactly one \
+                             of `deployment`, `instance_group` or `url`"
+                        ),
+                        Some(Locator::substring(&format!("location \"{path}\""))),
+                    ));
+                };
+                if let Some(o404) = loc.override_404
+                    && let Some(reason) = invalid_override_404(o404)
+                {
+                    return Err(err(
+                        format!(
+                            "`override_404` in location \"{path}\" of service \"{svc_name}\": {reason}"
+                        ),
+                        Some(Locator::substring(&format!("\"{o404}\""))),
+                    ));
+                }
+                if let LocationTarget::Url(url) = target
+                    && let Some(reason) = invalid_url_target(url)
+                {
+                    return Err(err(
+                        format!("`url` in location \"{path}\" of service \"{svc_name}\": {reason}"),
+                        Some(Locator::substring(&format!("\"{url}\""))),
+                    ));
+                }
+            }
+            // The same path twice — including the shorthand "/" colliding with
+            // an explicit one — can never both be reached.
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for loc in &resolved {
+                if !seen.insert(loc.path) {
+                    return Err(err(
+                        format!(
+                            "service \"{svc_name}\" defines location \"{}\" more than once",
+                            loc.path
+                        ),
+                        Some(Locator::substring(&format!("location \"{}\"", loc.path))),
+                    ));
+                }
+            }
+            // First match wins in the proxy: a location whose path extends an
+            // earlier one can never be reached.
+            let paths: Vec<&str> = resolved.iter().map(|l| l.path).collect();
+            for (i, &later) in paths.iter().enumerate() {
+                if let Some(&earlier) = paths[..i].iter().find(|&&e| later.starts_with(e)) {
+                    return Err(err(
+                        format!(
+                            "location \"{later}\" in service \"{svc_name}\" is unreachable: \
+                             \"{earlier}\" is declared before it and matches those requests first \
+                             — declare the more specific path first"
+                        ),
+                        Some(Locator::substring(&format!("location \"{later}\""))),
+                    ));
+                }
+            }
+        }
+        // Both explicit location refs and the shorthand must resolve to a
+        // defined deployment with a port, bound to at most one service.
+        let mut routed: BTreeMap<&str, &str> = BTreeMap::new();
+        for (svc_name, svc) in &self.service {
+            for dep_name in svc.referenced_deployments() {
+                let Some(dep) = self.deployment.get(dep_name) else {
+                    return Err(err(
+                        format!(
+                            "service \"{svc_name}\" routes to deployment \"{dep_name}\" which is not defined"
+                        ),
+                        Some(Locator::substring(&format!("\"{dep_name}\""))),
+                    ));
+                };
+                if dep.port.is_none() {
+                    return Err(err(
+                        format!(
+                            "deployment \"{dep_name}\" is routed by service \"{svc_name}\" but has no `port` set"
+                        ),
+                        Some(Locator::substring(&format!("deployment \"{dep_name}\""))),
+                    ));
+                }
+                if let Some(first) = routed.insert(dep_name, svc_name)
+                    && first != svc_name.as_str()
+                {
+                    return Err(err(
+                        format!(
+                            "deployment \"{dep_name}\" is routed from multiple services \
+                             (\"{first}\" and \"{svc_name}\"); a deployment can bind to only one service"
+                        ),
+                        Some(Locator::substring(&format!("\"{dep_name}\"")).nth(1)),
+                    ));
+                }
+            }
+        }
         for net in self.network.values() {
             if let Some(iprange) = &net.iprange
                 && let Some(reason) = invalid_ipv4_cidr(iprange)
@@ -235,24 +471,6 @@ impl UpConfig {
             }
         }
         for (name, dep) in &self.deployment {
-            if let Some(svc) = &dep.service {
-                if !self.service.contains_key(svc) {
-                    return Err(err(
-                        format!(
-                            "deployment \"{name}\" references service \"{svc}\" which is not defined"
-                        ),
-                        Some(Locator::substring(&format!("\"{svc}\""))),
-                    ));
-                }
-                if dep.port.is_none() {
-                    return Err(err(
-                        format!(
-                            "deployment \"{name}\" binds to service \"{svc}\" but has no `port` set"
-                        ),
-                        Some(Locator::substring(&format!("deployment \"{name}\""))),
-                    ));
-                }
-            }
             if let Some(net) = &dep.network
                 && !self.network.contains_key(net)
             {
@@ -316,6 +534,76 @@ fn var_object(vars: &BTreeMap<String, String>) -> hcl::Value {
     )
 }
 
+/// Returns an error message if `path` is not a usable location path prefix,
+/// else `None`. The proxy matches locations by raw `starts_with` against the
+/// request path with no normalization, so a prefix must look like the start of
+/// a request path: leading `/`, no query/fragment, no whitespace, no empty
+/// segments. A trailing slash is allowed — `/api/` (subtree only) and `/api`
+/// (subtree plus the bare path) are distinct, intentional routes.
+fn invalid_location_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return Some("path must start with \"/\"".into());
+    }
+    if let Some(c) = path
+        .chars()
+        .find(|c| matches!(c, '?' | '#') || c.is_whitespace())
+    {
+        return Some(format!(
+            "path must not contain {c:?}; a location is a path prefix, not a URL"
+        ));
+    }
+    if path.contains("//") {
+        return Some("path must not contain \"//\" (the proxy does not normalize paths)".into());
+    }
+    None
+}
+
+/// Returns an error message if `value` is not usable as an `override_404`,
+/// else `None`. The proxy re-routes within the same target by parsing the
+/// value as a path-and-query (it cannot jump to another host), so a full URL
+/// would be treated as a nonsense literal path. Parsed with the same `http`
+/// crate as the proxy, so the two agree exactly on character validity.
+fn invalid_override_404(value: &str) -> Option<String> {
+    if !value.starts_with('/') {
+        return Some(format!(
+            "{value:?} must be a path on the same target starting with \"/\" \
+             (e.g. \"/index.html\"), not a full URL"
+        ));
+    }
+    if value.contains("//") {
+        return Some(format!(
+            "{value:?} must not contain \"//\"; a leading \"//\" is a protocol-relative \
+             host reference, and the proxy does not normalize paths"
+        ));
+    }
+    match value.parse::<http::uri::PathAndQuery>() {
+        Ok(_) => None,
+        Err(e) => Some(format!("{value:?} is not a valid path: {e}")),
+    }
+}
+
+/// Returns an error message if `url` is not an absolute http(s) URL, else
+/// `None`. The proxy resolves the target host from the URL's authority, so a
+/// relative value has nowhere to go. Parsed with the same `http` crate as the
+/// proxy.
+fn invalid_url_target(url: &str) -> Option<String> {
+    let parsed: http::Uri = match url.parse() {
+        Ok(uri) => uri,
+        Err(e) => return Some(format!("{url:?} is not a valid URL: {e}")),
+    };
+    let scheme_ok = matches!(parsed.scheme_str(), Some("http") | Some("https"));
+    // `authority().is_some()` is true even for a host-less authority like
+    // ":8080"; require an actual non-empty host the proxy can connect to.
+    let host_ok = parsed.host().is_some_and(|h| !h.is_empty());
+    if scheme_ok && host_ok {
+        None
+    } else {
+        Some(format!(
+            "{url:?} must be an absolute URL like \"https://host\" or \"http://host/path\""
+        ))
+    }
+}
+
 /// Returns an error message if `iprange` is not a valid IPv4 CIDR block, else
 /// `None`. Parses with the same `cidr` crate as the backend, so the CLI and
 /// server agree exactly on what's accepted — notably, host bits must be zero
@@ -371,24 +659,14 @@ fn invalid_base_domain_host(host: &str) -> Option<String> {
 /// at any nesting depth. `hcl-rs` accepts both, but the deserializer either
 /// silently merges duplicates into a malformed expression value or yields a
 /// blank-keyed entry that survives all the way to API calls.
-fn validate_blocks<'a>(
-    path: &Path,
-    source: &str,
-    body: &'a hcl::Body,
-) -> Result<(), ConfigParseError> {
-    let mut seen: BTreeSet<(&'a str, Vec<&'a str>)> = BTreeSet::new();
-    walk_blocks(path, source, body, &mut seen)
-}
-
-fn walk_blocks<'a>(
-    path: &Path,
-    source: &str,
-    body: &'a hcl::Body,
-    seen: &mut BTreeSet<(&'a str, Vec<&'a str>)>,
-) -> Result<(), ConfigParseError> {
+///
+/// Duplicates are scoped to their parent body: two services may each declare a
+/// `location "/"`, but the same path twice *within* one service is rejected.
+fn validate_blocks(path: &Path, source: &str, body: &hcl::Body) -> Result<(), ConfigParseError> {
+    let mut seen: BTreeSet<(&str, Vec<&str>)> = BTreeSet::new();
     for block in body.blocks() {
         let kind = block.identifier();
-        let labels: Vec<&'a str> = block.labels().iter().map(|l| l.as_str()).collect();
+        let labels: Vec<&str> = block.labels().iter().map(|l| l.as_str()).collect();
 
         for label in &labels {
             if label.is_empty() {
@@ -413,7 +691,7 @@ fn walk_blocks<'a>(
             ));
         }
 
-        walk_blocks(path, source, block.body(), seen)?;
+        validate_blocks(path, source, block.body())?;
     }
     Ok(())
 }
@@ -690,11 +968,14 @@ project = "nginx-demo"
 
 service "nginx" {
   hosts = ["nginx.unisrv.dev"]
+
+  location "/" {
+    deployment = "nginx"
+  }
 }
 
 deployment "nginx" {
-  service = "nginx"
-  port    = 80
+  port = 80
   container {
     image = "nginx"
   }
@@ -707,13 +988,449 @@ deployment "nginx" {
             cfg.service["nginx"].hosts.as_deref(),
             Some(["nginx.unisrv.dev".to_string()].as_slice())
         );
+        assert_eq!(
+            cfg.service["nginx"].locations["/"].deployment.as_deref(),
+            Some("nginx")
+        );
 
         let dep = &cfg.deployment["nginx"];
-        assert_eq!(dep.service.as_deref(), Some("nginx"));
         assert_eq!(dep.port, Some(80));
         assert_eq!(dep.container.image, "nginx");
         assert!(dep.container.args.is_none());
         assert!(dep.container.env.is_none());
+    }
+
+    #[test]
+    fn parses_location_block_with_deployment_target() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" {
+    deployment = "api"
+  }
+}
+deployment "api" {
+  port = 8000
+  container { image = "i" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        let locations = &cfg.service["web"].locations;
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations["/api"].deployment.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn preserves_location_declaration_order() {
+        // The proxy walks locations in order (first match wins), so the parsed
+        // table must come back in file order — not sorted.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/zzz" { deployment = "a" }
+  location "/api" { deployment = "b" }
+  location "/aaa" { deployment = "c" }
+}
+deployment "a" {
+  port = 1
+  container { image = "i" }
+}
+deployment "b" {
+  port = 2
+  container { image = "i" }
+}
+deployment "c" {
+  port = 3
+  container { image = "i" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        let paths: Vec<&str> = cfg.service["web"]
+            .locations
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(paths, vec!["/zzz", "/api", "/aaa"]);
+    }
+
+    #[test]
+    fn rejects_location_with_two_targets() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" {
+    deployment     = "api"
+    instance_group = "canary"
+  }
+}
+deployment "api" {
+  port = 8000
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("exactly one"), "states the rule: {msg}");
+        assert!(msg.contains("/api"), "names the location: {msg}");
+    }
+
+    #[test]
+    fn rejects_location_with_no_target() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" {}
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("exactly one"), "states the rule: {msg}");
+        assert!(
+            msg.contains("deployment") && msg.contains("instance_group") && msg.contains("url"),
+            "lists the target attributes: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_location_referencing_undefined_deployment() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" { deployment = "ghost" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost"), "names the deployment: {msg}");
+        assert!(msg.contains("not defined"), "explains the rule: {msg}");
+    }
+
+    #[test]
+    fn rejects_shorthand_referencing_undefined_deployment() {
+        let src = r#"
+project = "demo"
+service "web" {
+  deployment = "ghost"
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost"), "names the deployment: {msg}");
+        assert!(msg.contains("not defined"), "explains the rule: {msg}");
+    }
+
+    #[test]
+    fn rejects_routed_deployment_without_port() {
+        // The binding forwards traffic to the container's port; a routed
+        // deployment without one has nowhere to receive it.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/" { deployment = "app" }
+}
+deployment "app" {
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("port"), "names the missing field: {msg}");
+        assert!(msg.contains("app"), "names the deployment: {msg}");
+    }
+
+    #[test]
+    fn rejects_deployment_routed_from_two_services() {
+        // A deployment binds to exactly one service (the binding is singular
+        // on the backend), so references from two services are a config error.
+        let src = r#"
+project = "demo"
+service "a" {
+  location "/" { deployment = "app" }
+}
+service "b" {
+  deployment = "app"
+}
+deployment "app" {
+  port = 80
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("app"), "names the deployment: {msg}");
+        assert!(
+            msg.contains("\"a\"") && msg.contains("\"b\""),
+            "names both services: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_location_paths() {
+        // The proxy matches raw string prefixes with no normalization, so
+        // anything that can't be a request-path prefix is a config bug.
+        for (path, why) in [
+            ("api", "missing leading slash"),
+            ("/api?x=1", "query string"),
+            ("/api#frag", "fragment"),
+            ("/api docs", "whitespace"),
+            ("/api//v2", "double slash"),
+        ] {
+            let src = format!(
+                r#"
+project = "demo"
+service "web" {{
+  location "{path}" {{ instance_group = "g" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(path),
+                "({why}) should name the path {path:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_trailing_slash_location_path() {
+        // "/api/" is a distinct, intentional route: it matches "/api/…" but not
+        // bare "/api" (and not "/apifoo") — so it must not be rejected or stripped.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api/" { instance_group = "g" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert!(cfg.service["web"].locations.contains_key("/api/"));
+    }
+
+    #[test]
+    fn rejects_unreachable_shadowed_location() {
+        // The proxy walks locations in declared order, first match wins: with
+        // "/" declared first, "/api" can never match.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/" { instance_group = "front" }
+  location "/api" { instance_group = "api" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unreachable"), "states the problem: {msg}");
+        assert!(
+            msg.contains("/api") && msg.contains("\"/\""),
+            "names both locations: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_specific_location_before_catchall() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" { instance_group = "api" }
+  location "/" { instance_group = "front" }
+}
+"#;
+        assert!(UpConfig::parse(src).is_ok());
+    }
+
+    #[test]
+    fn rejects_shorthand_alongside_explicit_root_location() {
+        // The shorthand desugars to a "/" location appended after the explicit
+        // ones, so declaring an explicit "/" too is a duplicate path.
+        let src = r#"
+project = "demo"
+service "web" {
+  deployment = "app"
+  location "/" { instance_group = "g" }
+}
+deployment "app" {
+  port = 80
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("more than once"),
+            "states the duplicate: {msg}"
+        );
+        assert!(msg.contains("location \"/\""), "names the path: {msg}");
+    }
+
+    #[test]
+    fn accepts_same_location_path_in_different_services() {
+        let src = r#"
+project = "demo"
+service "a" {
+  location "/" { instance_group = "g1" }
+}
+service "b" {
+  location "/" { instance_group = "g2" }
+}
+"#;
+        assert!(UpConfig::parse(src).is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_location_paths_within_a_service() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" { instance_group = "g1" }
+  location "/api" { instance_group = "g2" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("duplicate"), "states the problem: {msg}");
+        assert!(msg.contains("/api"), "names the path: {msg}");
+    }
+
+    #[test]
+    fn rejects_override_404_that_is_not_a_path() {
+        // The proxy parses override_404 as a path+query to re-route within the
+        // same upstream — a full URL (scheme/host) silently fails there.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/" {
+    instance_group = "g"
+    override_404   = "https://other.example.com/fallback"
+  }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("override_404"), "names the field: {msg}");
+        assert!(
+            msg.contains("path"),
+            "explains it must be a path, not a URL: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_override_404_with_double_slash() {
+        // "//evil.com/login" is a protocol-relative authority, not a path on the
+        // same target; the proxy does not normalize, so it must be rejected just
+        // like a location path with "//".
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/" {
+    instance_group = "g"
+    override_404   = "//evil.com/login"
+  }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("override_404"), "names the field: {msg}");
+        assert!(msg.contains("//"), "explains the double-slash problem: {msg}");
+    }
+
+    #[test]
+    fn rejects_non_absolute_url_target() {
+        for bad in ["old.example.com", "/internal", "ftp://files.example.com"] {
+            let src = format!(
+                r#"
+project = "demo"
+service "web" {{
+  location "/legacy" {{ url = "{bad}" }}
+}}
+"#
+            );
+            let err = UpConfig::parse(&src).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(bad), "names the value {bad:?}: {msg}");
+            assert!(
+                msg.contains("http://") || msg.contains("https://"),
+                "should show the expected shape: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_url_target_with_empty_host() {
+        // "http://:8080" parses as a valid URI with an authority but no host;
+        // the proxy resolves the target host from the authority, so a host-less
+        // URL has nowhere to connect and must be rejected at parse time.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/legacy" { url = "http://:8080" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("http://:8080"), "names the value: {msg}");
+        assert!(
+            msg.contains("http://") || msg.contains("https://"),
+            "shows the expected shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn lints_instance_group_matching_a_deployment_name() {
+        // `instance_group` routes to a raw group WITHOUT binding the
+        // deployment — if a deployment by that name exists, the user almost
+        // certainly wanted `deployment =`. Warn, don't error: it stays valid
+        // for groups genuinely populated out-of-band.
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/api" { instance_group = "api" }
+}
+deployment "api" {
+  port = 8000
+  container { image = "i" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        let lints = cfg.lints();
+        assert_eq!(lints.len(), 1);
+        assert!(lints[0].contains("instance_group"), "lint: {}", lints[0]);
+        assert!(
+            lints[0].contains("deployment = \"api\""),
+            "suggests the fix: {}",
+            lints[0]
+        );
+    }
+
+    #[test]
+    fn no_lints_for_unrelated_instance_group() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/canary" { instance_group = "canary" }
+}
+"#;
+        let cfg = UpConfig::parse(src).unwrap();
+        assert!(cfg.lints().is_empty());
+    }
+
+    #[test]
+    fn resolves_vars_inside_location_blocks() {
+        let src = r#"
+project = "demo"
+service "web" {
+  location "/legacy" {
+    url = "https://${var.legacy_host}/v1"
+  }
+}
+"#;
+        let cfg = match resolve_with(src, &[("legacy_host", "old.example.com")]) {
+            VarResolution::Resolved(cfg) => cfg,
+            VarResolution::Missing(m) => panic!("unexpected missing vars: {m:?}"),
+        };
+        assert_eq!(
+            cfg.service["web"].locations["/legacy"].url.as_deref(),
+            Some("https://old.example.com/v1")
+        );
     }
 
     #[test]
@@ -725,6 +1442,29 @@ service "web" {}
         let cfg = UpConfig::parse(src).unwrap();
         assert_eq!(cfg.service.len(), 1);
         assert!(cfg.service["web"].hosts.is_none());
+    }
+
+    #[test]
+    fn rejects_service_attr_on_deployment() {
+        // Binding moved to the service side: `deployment.service` is gone.
+        // Pre-alpha: a plain unknown-field rejection (which still names
+        // `service`) is enough — no migration hint.
+        let src = r#"
+project = "demo"
+service "web" {}
+deployment "web" {
+  service = "web"
+  port    = 80
+  container { image = "i" }
+}
+"#;
+        let err = UpConfig::parse(src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("service"), "should name the field: {msg}");
+        assert!(
+            msg.contains("unknown"),
+            "should be a plain unknown-field rejection: {msg}"
+        );
     }
 
     #[test]
@@ -863,34 +1603,6 @@ deployment "d" {
         let err = UpConfig::parse(src).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("typo"), "error was: {msg}");
-    }
-
-    #[test]
-    fn rejects_deployment_referencing_undefined_service() {
-        let src = r#"
-project = "x"
-deployment "d" {
-  service = "missing"
-  port = 80
-  container { image = "i" }
-}
-"#;
-        let err = UpConfig::parse(src).unwrap_err();
-        assert!(format!("{err:#}").contains("missing"));
-    }
-
-    #[test]
-    fn rejects_service_bound_deployment_without_port() {
-        let src = r#"
-project = "x"
-service "s" {}
-deployment "d" {
-  service = "s"
-  container { image = "i" }
-}
-"#;
-        let err = UpConfig::parse(src).unwrap_err();
-        assert!(format!("{err:#}").contains("port"));
     }
 
     #[test]
@@ -1039,7 +1751,8 @@ deployment "d" {
     }
 
     #[test]
-    fn parses_bare_deployment_without_service() {
+    fn parses_bare_deployment_without_port() {
+        // A deployment nothing routes to (a worker) needs no port.
         let src = r#"
 project = "x"
 deployment "worker" {
@@ -1047,8 +1760,6 @@ deployment "worker" {
 }
 "#;
         let cfg = UpConfig::parse(src).unwrap();
-        let dep = &cfg.deployment["worker"];
-        assert!(dep.service.is_none());
-        assert!(dep.port.is_none());
+        assert!(cfg.deployment["worker"].port.is_none());
     }
 }

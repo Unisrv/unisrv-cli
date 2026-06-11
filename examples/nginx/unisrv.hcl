@@ -1,10 +1,11 @@
 project = "nginx"
 
-service "nginx" {}
+service "nginx" {
+  deployment = "nginx"
+}
 
 deployment "nginx" {
-  service = "nginx"
-  port    = 80
+  port = 80
   container {
     image = "nginx:latest"
   }

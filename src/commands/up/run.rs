@@ -41,6 +41,9 @@ pub async fn run(
     let base = vars::collect(var_flags, &files)?;
     let interactive = std::io::stdin().is_terminal();
     let config = vars::resolve_config(path, &source, base, interactive, &prompter)?;
+    for lint in config.lints() {
+        println!("  {} {lint}", console::style("!").yellow());
+    }
     let desired = DesiredState::from_config(config);
 
     let progress = SpinnerProgress::new();

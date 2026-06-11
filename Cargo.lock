@@ -2090,6 +2090,8 @@ dependencies = [
  "dialoguer",
  "futures-util",
  "hcl-rs",
+ "http",
+ "indexmap",
  "indicatif",
  "serde",
  "serde_json",

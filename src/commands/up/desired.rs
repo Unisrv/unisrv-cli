@@ -13,7 +13,7 @@ use unisrv_api::models::{
 
 use crate::commands::host::normalize_host;
 
-use super::config::UpConfig;
+use super::config::{LocationTarget, UpConfig};
 use super::defaults::*;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,19 +64,62 @@ impl DesiredState {
     pub fn from_config(cfg: UpConfig) -> Self {
         let project = cfg.project;
 
+        // A location's deployment reference IS the service binding: the
+        // deployment joins the instance group named after it. Collect the
+        // bindings service-side before deployments are built.
+        let mut bindings: BTreeMap<String, DesiredServiceBinding> = BTreeMap::new();
+        for (svc_name, block) in &cfg.service {
+            for dep in block.referenced_deployments() {
+                bindings.insert(
+                    dep.to_string(),
+                    DesiredServiceBinding {
+                        service_name: svc_name.clone(),
+                        target_group: dep.to_string(),
+                    },
+                );
+            }
+        }
+
         let services = cfg
             .service
             .into_iter()
             .map(|(name, block)| {
-                let configuration = HTTPServiceConfig {
-                    locations: vec![HTTPLocation {
+                let mut locations: Vec<HTTPLocation> = block
+                    .resolved_locations()
+                    .into_iter()
+                    .map(|loc| {
+                        // Validation guarantees exactly one target.
+                        let target = match loc
+                            .target
+                            .expect("validation guarantees exactly one location target")
+                        {
+                            LocationTarget::Url(url) => HTTPLocationTarget::Url { url },
+                            LocationTarget::Deployment(group)
+                            | LocationTarget::InstanceGroup(group) => {
+                                HTTPLocationTarget::Instance { group }
+                            }
+                        };
+                        HTTPLocation {
+                            path: loc.path.to_string(),
+                            override_404: loc.override_404.map(str::to_string),
+                            target,
+                        }
+                    })
+                    .collect();
+                if locations.is_empty() {
+                    // No routing declared at all: reserve the host with a
+                    // catch-all to the (out-of-band) default group.
+                    locations.push(HTTPLocation {
                         path: DEFAULT_LOCATION_PATH.to_string(),
                         override_404: None,
                         target: HTTPLocationTarget::Instance {
                             group: DEFAULT_TARGET_GROUP.to_string(),
                         },
-                    }],
-                    allow_http: DEFAULT_ALLOW_HTTP,
+                    });
+                }
+                let configuration = HTTPServiceConfig {
+                    locations,
+                    allow_http: block.allow_http.unwrap_or(DEFAULT_ALLOW_HTTP),
                 };
                 let svc = DesiredService {
                     name: name.clone(),
@@ -110,10 +153,7 @@ impl DesiredState {
                     memory_mb: DEFAULT_MEMORY_MB,
                     instance_port: block.port,
                 };
-                let service_binding = block.service.map(|svc| DesiredServiceBinding {
-                    service_name: svc,
-                    target_group: DEFAULT_TARGET_GROUP.to_string(),
-                });
+                let service_binding = bindings.remove(&name);
                 let dep = DesiredDeployment {
                     name: name.clone(),
                     configuration,
@@ -203,10 +243,12 @@ service "web" { hosts = ["web.example.com"] }
         let state = parse(
             r#"
 project = "demo"
-service "web" { hosts = ["web.example.com"] }
+service "web" {
+  hosts = ["web.example.com"]
+  location "/" { deployment = "web" }
+}
 deployment "web" {
-  service = "web"
-  port    = 8080
+  port = 8080
   container { image = "myapp:1" }
 }
 "#,
@@ -223,7 +265,132 @@ deployment "web" {
 
         let binding = dep.service_binding.as_ref().unwrap();
         assert_eq!(binding.service_name, "web");
-        assert_eq!(binding.target_group, DEFAULT_TARGET_GROUP);
+        assert_eq!(binding.target_group, "web");
+    }
+
+    #[test]
+    fn location_deployment_ref_routes_and_binds() {
+        // A location's deployment reference does two things: it becomes an
+        // instance-group target (group = deployment name) in the service's
+        // routing table, and it binds that deployment to the service.
+        let state = parse(
+            r#"
+project = "demo"
+service "web" {
+  location "/api" { deployment = "api" }
+}
+deployment "api" {
+  port = 8000
+  container { image = "api:1" }
+}
+"#,
+        );
+        let locations = &state.services["web"].configuration.locations;
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].path, "/api");
+        assert_eq!(
+            locations[0].target,
+            HTTPLocationTarget::Instance {
+                group: "api".into()
+            }
+        );
+
+        let binding = state.deployments["api"].service_binding.as_ref().unwrap();
+        assert_eq!(binding.service_name, "web");
+        assert_eq!(binding.target_group, "api");
+    }
+
+    #[test]
+    fn service_deployment_shorthand_desugars_to_catchall_appended_last() {
+        // `deployment = "x"` on a service is sugar for `location "/" { deployment = "x" }`.
+        // The proxy matches first-match-wins, so the catch-all must land after
+        // every explicit location regardless of where the attribute sits.
+        let state = parse(
+            r#"
+project = "demo"
+service "web" {
+  deployment = "frontend"
+  location "/api" { deployment = "api" }
+}
+deployment "frontend" {
+  port = 3000
+  container { image = "front:1" }
+}
+deployment "api" {
+  port = 8000
+  container { image = "api:1" }
+}
+"#,
+        );
+        let locations = &state.services["web"].configuration.locations;
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].path, "/api");
+        assert_eq!(locations[1].path, "/");
+        assert_eq!(
+            locations[1].target,
+            HTTPLocationTarget::Instance {
+                group: "frontend".into()
+            }
+        );
+
+        let binding = state.deployments["frontend"]
+            .service_binding
+            .as_ref()
+            .unwrap();
+        assert_eq!(binding.service_name, "web");
+        assert_eq!(binding.target_group, "frontend");
+    }
+
+    #[test]
+    fn url_and_instance_group_targets_flow_through() {
+        // `url` proxies externally (no binding); `instance_group` routes to a
+        // raw group populated out-of-band (no binding either).
+        let state = parse(
+            r#"
+project = "demo"
+service "web" {
+  location "/legacy" { url = "https://old.example.com" }
+  location "/canary" { instance_group = "canary" }
+}
+"#,
+        );
+        let locations = &state.services["web"].configuration.locations;
+        assert_eq!(locations.len(), 2);
+        assert_eq!(
+            locations[0].target,
+            HTTPLocationTarget::Url {
+                url: "https://old.example.com".into()
+            }
+        );
+        assert_eq!(
+            locations[1].target,
+            HTTPLocationTarget::Instance {
+                group: "canary".into()
+            }
+        );
+        assert!(state.deployments.is_empty());
+    }
+
+    #[test]
+    fn allow_http_and_override_404_flow_through() {
+        let state = parse(
+            r#"
+project = "demo"
+service "web" {
+  allow_http = true
+  location "/" {
+    instance_group = "front"
+    override_404   = "/index.html"
+  }
+}
+"#,
+        );
+        let cfg = &state.services["web"].configuration;
+        assert!(cfg.allow_http);
+        assert_eq!(
+            cfg.locations[0].override_404.as_deref(),
+            Some("/index.html")
+        );
     }
 
     #[test]
